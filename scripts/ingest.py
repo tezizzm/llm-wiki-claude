@@ -418,6 +418,23 @@ def extract_pdf_text(path: Path) -> str:
         return text
     return f"[PDF parsed but no extractable text found: {path.name}]"
 
+def extract_rst_text(path: Path) -> str:
+    try:
+        from docutils.core import publish_doctree
+    except ImportError:
+        return "[RST support requires docutils: pip install docutils]"
+    raw = read_text_file(path)
+    try:
+        doctree = publish_doctree(raw,
+                                  settings_overrides={'report_level': 5, 'halt_level': 5})
+        text = doctree.astext().strip()
+    except Exception:
+        text = raw  # fallback to raw text
+    if not text:
+        return f"[RST parsed but no extractable text found: {path.name}]"
+    return text
+
+
 def extract_text(path: Path) -> str:
     ext = path.suffix.lower()
     if ext in {".txt", ".md", ".py", ".json", ".yaml", ".yml", ".csv"}:
@@ -426,6 +443,8 @@ def extract_text(path: Path) -> str:
         return extract_pdf_text(path)
     if ext in {".html", ".htm"}:
         return extract_html_text(path)
+    if ext == ".rst":
+        return extract_rst_text(path)
     return f"[Unsupported file type for direct parsing: {path.name}]"
 
 def init_client() -> tuple[anthropic.Anthropic, str]:

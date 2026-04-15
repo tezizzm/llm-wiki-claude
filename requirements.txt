@@ -1,0 +1,7 @@
+anthropic>=0.54.0
+python-dotenv>=1.0.1
+pydantic>=2.8.2
+pypdf>=5.4.0
+docutils>=0.20
+pytest>=8.3.0
+wheel>=0.45.0

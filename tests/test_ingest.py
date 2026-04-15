@@ -647,3 +647,82 @@ def test_extract_html_text_latin1_fallback(tmp_path):
     )
     result = ingest.extract_html_text(html_file)
     assert "caf" in result
+
+
+# --- RST extraction tests (LWC-8tav) ---
+
+
+def test_extract_rst_text_converts_headings_and_bold(tmp_path):
+    rst_file = tmp_path / "sample.rst"
+    rst_file.write_text(
+        "My Title\n"
+        "========\n"
+        "\n"
+        "Some **bold** text here.\n"
+        "\n"
+        "* Item one\n"
+        "* Item two\n",
+        encoding="utf-8",
+    )
+    result = ingest.extract_rst_text(rst_file)
+    assert "My Title" in result
+    assert "bold" in result
+    assert "Item one" in result
+    assert "Item two" in result
+    # RST directives should be stripped
+    assert "========" not in result
+    assert "**" not in result
+
+
+def test_extract_rst_text_empty_returns_placeholder(tmp_path):
+    rst_file = tmp_path / "empty.rst"
+    rst_file.write_text("", encoding="utf-8")
+    result = ingest.extract_rst_text(rst_file)
+    assert result == "[RST parsed but no extractable text found: empty.rst]"
+
+
+def test_extract_text_dispatches_rst_extension(tmp_path):
+    rst_file = tmp_path / "page.rst"
+    rst_file.write_text(
+        "Hello\n=====\n\nWorld.\n",
+        encoding="utf-8",
+    )
+    result = ingest.extract_text(rst_file)
+    assert "Hello" in result
+    assert "World" in result
+
+
+def test_extract_rst_text_latin1_fallback(tmp_path):
+    rst_file = tmp_path / "latin1.rst"
+    # Write bytes that are valid Latin-1 but invalid UTF-8
+    rst_file.write_bytes(b"Title\n=====\n\ncaf\xe9\n")
+    result = ingest.extract_rst_text(rst_file)
+    assert "caf" in result
+
+
+def test_extract_rst_text_missing_docutils(tmp_path, monkeypatch):
+    rst_file = tmp_path / "nodeps.rst"
+    rst_file.write_text("Hello\n=====\n", encoding="utf-8")
+
+    # Clear any cached import of docutils.core so the function re-imports it
+    import sys as _sys
+    saved_modules = {}
+    for mod_name in list(_sys.modules):
+        if mod_name.startswith("docutils"):
+            saved_modules[mod_name] = _sys.modules.pop(mod_name)
+
+    import builtins
+    real_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if name == "docutils.core" or name == "docutils":
+            raise ImportError("No module named 'docutils'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+    try:
+        result = ingest.extract_rst_text(rst_file)
+        assert result == "[RST support requires docutils: pip install docutils]"
+    finally:
+        # Restore docutils modules so other tests are not affected
+        _sys.modules.update(saved_modules)
