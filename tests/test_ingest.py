@@ -1,0 +1,649 @@
+import importlib.util
+import json
+import sys
+from datetime import datetime as real_datetime
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+INGEST_PATH = ROOT / "scripts" / "ingest.py"
+spec = importlib.util.spec_from_file_location("ingest_module", INGEST_PATH)
+ingest = importlib.util.module_from_spec(spec)
+assert spec and spec.loader
+spec.loader.exec_module(ingest)
+
+
+def test_template_ingest_settings_is_shareable():
+    config = json.loads(Path("ingest-settings.json").read_text(encoding="utf-8"))
+    assert config["schema_version"] == 1
+    assert config["max_topics"] == 6
+    assert config["max_entities"] == 6
+    assert "opaque_task_regex" in config["low_signal_sources"]
+
+
+def test_load_ingest_settings_compiles_low_signal_regex(tmp_path, monkeypatch):
+    local = tmp_path / "ingest-settings.local.json"
+    fallback = tmp_path / "ingest-settings.json"
+    fallback.write_text(json.dumps({"max_topics": 5}), encoding="utf-8")
+    monkeypatch.setattr(ingest, "INGEST_SETTINGS_PATH", local)
+    monkeypatch.setattr(ingest, "INGEST_FALLBACK_SETTINGS_PATH", fallback)
+
+    settings = ingest.load_ingest_settings()
+
+    assert settings["max_topics"] == 5
+    assert settings["low_signal_sources"]["opaque_task_regex_compiled"].match("AM-ab12.md")
+
+
+def test_prepare_ingest_settings_warns_for_deprecated_config_version(tmp_path):
+    settings_path = tmp_path / "ingest-settings.json"
+    prepared, warnings = ingest.prepare_ingest_settings({"config_version": 1}, settings_path)
+
+    assert prepared["schema_version"] == 1
+    assert "deprecated" in warnings[0]
+
+
+def test_is_low_signal_source_uses_settings():
+    settings = ingest.load_ingest_settings()
+    assert ingest.is_low_signal_source(Path("AM-ab12.md"), settings) is True
+    assert ingest.is_low_signal_source(Path("product_spec.md"), settings) is False
+
+
+def test_select_terms_filters_topics_and_entities():
+    settings = ingest.load_ingest_settings()
+
+    topics = ingest.select_terms(
+        ["Approval Workflow", "Issue21", "pkg/runtime/provider.go", "Approval Workflow"],
+        settings["max_topics"],
+        ingest.is_low_value_topic,
+        settings,
+    )
+    entities = ingest.select_terms(
+        ["AgentMesh", "ExecDispatcher", "Kubernetes", "future stakeholder"],
+        settings["max_entities"],
+        ingest.is_low_value_entity,
+        settings,
+    )
+
+    assert topics == ["Approval Workflow"]
+    assert entities == ["AgentMesh", "Kubernetes"]
+
+
+def test_frontmatter_value_reads_title():
+    text = "---\ntitle: \"Hello World\"\nstatus: draft\n---\nbody"
+    assert ingest.frontmatter_value(text, "title") == "Hello World"
+    assert ingest.frontmatter_value(text, "missing") is None
+
+
+def test_init_client_requires_real_api_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "your_anthropic_api_key_here")
+    try:
+        ingest.init_client()
+    except RuntimeError as exc:
+        assert "Missing ANTHROPIC_API_KEY" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeError for placeholder API key")
+
+
+def test_save_last_ingest_run_writes_summary(tmp_path, monkeypatch):
+    target = tmp_path / "last_ingest_run.json"
+    monkeypatch.setattr(ingest, "LAST_INGEST_RUN_PATH", target)
+    monkeypatch.setattr(ingest, "STATE_DIR", tmp_path)
+
+    ingest.save_last_ingest_run({"status": "completed", "processed": 2})
+
+    saved = json.loads(target.read_text(encoding="utf-8"))
+    assert saved["status"] == "completed"
+    assert saved["processed"] == 2
+
+
+def test_upsert_source_contribution_replaces_existing_block(tmp_path):
+    target = tmp_path / "topic.md"
+    target.write_text(
+        ingest.render_contribution_block("old.md", "# Old\n\nOld content") + "\n",
+        encoding="utf-8",
+    )
+
+    ingest.upsert_source_contribution(target, "old.md", "# Old\n\nNew content")
+
+    content = target.read_text(encoding="utf-8")
+    assert content.count("<!-- SOURCE:old.md -->") == 1
+    assert "New content" in content
+    assert "Old content" not in content
+
+
+def test_remove_source_contribution_deletes_empty_file(tmp_path):
+    target = tmp_path / "entity.md"
+    target.write_text(
+        ingest.render_contribution_block("demo.md", "# Entity\n\nOnly content") + "\n",
+        encoding="utf-8",
+    )
+
+    removed = ingest.remove_source_contribution(target, "demo.md")
+
+    assert removed is True
+    assert not target.exists()
+
+
+def test_cleanup_source_artifacts_uses_manifest_record(tmp_path, monkeypatch):
+    root = tmp_path
+    wiki_dir = root / "wiki"
+    summaries = wiki_dir / "summaries"
+    topics = wiki_dir / "topics"
+    entities = wiki_dir / "entities"
+    summaries.mkdir(parents=True)
+    topics.mkdir(parents=True)
+    entities.mkdir(parents=True)
+
+    monkeypatch.setattr(ingest, "ROOT", root)
+    monkeypatch.setattr(ingest, "SUMMARIES_DIR", summaries)
+    monkeypatch.setattr(ingest, "TOPICS_DIR", topics)
+    monkeypatch.setattr(ingest, "ENTITIES_DIR", entities)
+
+    (summaries / "demo.md").write_text("# Summary", encoding="utf-8")
+    ingest.upsert_source_contribution(topics / "agent-router.md", "demo.md", "# Agent Router")
+    ingest.upsert_source_contribution(entities / "demomesh.md", "demo.md", "# DemoMesh")
+
+    removed = ingest.cleanup_source_artifacts(
+        "demo.md",
+        {
+            "summary_path": "wiki/summaries/demo.md",
+            "topic_slugs": ["agent-router"],
+            "entity_slugs": ["demomesh"],
+        },
+    )
+
+    assert removed == {"summaries": 1, "topics": 1, "entities": 1}
+    assert not (summaries / "demo.md").exists()
+    assert not (topics / "agent-router.md").exists()
+    assert not (entities / "demomesh.md").exists()
+
+
+def test_refine_merged_pages_merges_plural_alias_and_normalizes(tmp_path, monkeypatch):
+    root = tmp_path
+    wiki_dir = root / "wiki"
+    topics = wiki_dir / "topics"
+    entities = wiki_dir / "entities"
+    summaries = wiki_dir / "summaries"
+    topics.mkdir(parents=True)
+    entities.mkdir(parents=True)
+    summaries.mkdir(parents=True)
+
+    monkeypatch.setattr(ingest, "ROOT", root)
+    monkeypatch.setattr(ingest, "TOPICS_DIR", topics)
+    monkeypatch.setattr(ingest, "ENTITIES_DIR", entities)
+    monkeypatch.setattr(ingest, "SUMMARIES_DIR", summaries)
+    monkeypatch.setattr(ingest, "STATE_DIR", root / "state")
+    monkeypatch.setattr(ingest, "INGEST_EVENTS_PATH", root / "state" / "ingest_events.jsonl")
+
+    ingest.upsert_source_contribution(topics / "approval-workflows.md", "one.md", "# Approval Workflows\n\nOne")
+    ingest.upsert_source_contribution(topics / "approval-workflow.md", "two.md", "# Approval Workflow\n\nTwo")
+
+    actions = ingest.refine_merged_pages(ingest.load_ingest_settings())
+
+    assert actions["topic_alias_merges"] == 1
+    merged = (topics / "approval-workflow.md").read_text(encoding="utf-8")
+    assert "one.md" in merged
+    assert "two.md" in merged
+    assert not (topics / "approval-workflows.md").exists()
+
+
+def test_write_last_ingest_report_writes_markdown_report(tmp_path, monkeypatch):
+    report_path = tmp_path / "last_ingest_report.md"
+    monkeypatch.setattr(ingest, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(ingest, "INGEST_REPORT_PATH", report_path)
+
+    ingest.write_last_ingest_report(
+        {
+            "status": "completed",
+            "ran_at_utc": "2026-01-02T03:04:05Z",
+            "model": "fake-model",
+            "raw_candidates": 3,
+            "processed": 2,
+            "reconciled": False,
+            "cleaned_stale": {"manifest_entries": 1},
+            "merge_cleanup": {"topic_alias_merges": 1, "entity_alias_merges": 0, "topic_low_value_prunes": 0, "entity_low_value_prunes": 0},
+            "page_stats": {"summaries": 2, "topics": 3, "entities": 1, "topic_contributions": 4, "entity_contributions": 1},
+            "processed_files": ["a.md", "b.md"],
+            "errors": [],
+        }
+    )
+
+    report = report_path.read_text(encoding="utf-8")
+    assert "# Last Ingest Report" in report
+    assert "`completed`" in report
+    assert "`a.md`" in report
+    assert "Topic alias merges" in report
+
+
+def test_extract_text_supports_pdf_via_pdf_reader(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "demo.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class FakePage:
+        def extract_text(self):
+            return "PDF content"
+
+    class FakeReader:
+        def __init__(self, path):
+            self.pages = [FakePage()]
+
+    monkeypatch.setattr(ingest, "PdfReader", FakeReader)
+    assert ingest.extract_text(pdf_path) == "PDF content"
+
+
+def test_ingest_main_builds_expected_summary_from_fixture(tmp_path, monkeypatch):
+    fixture_root = Path("tests/fixtures/ingest/basic")
+    raw_fixture = fixture_root / "raw" / "demo.md"
+    expected_summary = (fixture_root / "golden" / "summary.md").read_text(encoding="utf-8")
+
+    root = tmp_path
+    raw_dir = root / "raw" / "inbox"
+    wiki_dir = root / "wiki"
+    state_dir = root / "state"
+    schemas_dir = root / "schemas"
+    raw_dir.mkdir(parents=True)
+    wiki_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    schemas_dir.mkdir(parents=True)
+    (schemas_dir / "AGENTS.md").write_text("Test schema", encoding="utf-8")
+    (root / ".wikiignore").write_text("", encoding="utf-8")
+    (root / "ingest-settings.json").write_text(Path("ingest-settings.json").read_text(encoding="utf-8"), encoding="utf-8")
+    (raw_dir / "demo.md").write_text(raw_fixture.read_text(encoding="utf-8"), encoding="utf-8")
+
+    monkeypatch.setattr(ingest, "ROOT", root)
+    monkeypatch.setattr(ingest, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(ingest, "WIKI_DIR", wiki_dir)
+    monkeypatch.setattr(ingest, "SUMMARIES_DIR", wiki_dir / "summaries")
+    monkeypatch.setattr(ingest, "TOPICS_DIR", wiki_dir / "topics")
+    monkeypatch.setattr(ingest, "ENTITIES_DIR", wiki_dir / "entities")
+    monkeypatch.setattr(ingest, "STATE_DIR", state_dir)
+    monkeypatch.setattr(ingest, "MANIFEST_PATH", state_dir / "manifest.json")
+    monkeypatch.setattr(ingest, "INDEX_PATH", root / "index.md")
+    monkeypatch.setattr(ingest, "LOG_PATH", root / "log.md")
+    monkeypatch.setattr(ingest, "SCHEMA_PATH", schemas_dir / "AGENTS.md")
+    monkeypatch.setattr(ingest, "WIKIIGNORE_PATH", root / ".wikiignore")
+    monkeypatch.setattr(ingest, "INGEST_FALLBACK_SETTINGS_PATH", root / "ingest-settings.json")
+    monkeypatch.setattr(ingest, "INGEST_SETTINGS_PATH", root / "ingest-settings.local.json")
+    monkeypatch.setattr(ingest, "LAST_INGEST_RUN_PATH", state_dir / "last_ingest_run.json")
+    monkeypatch.setattr(ingest, "INGEST_EVENTS_PATH", state_dir / "ingest_events.jsonl")
+    monkeypatch.setattr(ingest, "INGEST_REPORT_PATH", state_dir / "last_ingest_report.md")
+
+    class FixedDateTime:
+        @staticmethod
+        def utcnow():
+            return real_datetime(2026, 1, 2, 3, 4, 5)
+
+    monkeypatch.setattr(ingest, "datetime", FixedDateTime)
+    monkeypatch.setattr(ingest, "init_client", lambda: ("fake-client", "fake-model"))
+    monkeypatch.setattr(
+        ingest,
+        "call_claude_json",
+        lambda client, model, system_prompt, user_prompt: {
+            "title": "Demo Knowledge Page",
+            "summary": "AgentMesh coordinates distributed agent work through a registry and router.",
+            "key_facts": [
+                "AgentMesh has a capability registry",
+                "AgentMesh has an agent router",
+            ],
+            "topics": ["Capability Registry", "Agent Router"],
+            "entities": ["AgentMesh", "Dapr"],
+            "open_questions": ["How should routing policies evolve?"],
+            "topic_summaries": {
+                "Capability Registry": "Registry for agent capabilities.",
+                "Agent Router": "Routes work to the right capability.",
+            },
+            "entity_summaries": {
+                "AgentMesh": "Distributed control plane for agent ecosystems.",
+                "Dapr": "Runtime substrate used by AgentMesh.",
+            },
+        },
+    )
+
+    monkeypatch.setattr(sys, "argv", ["ingest.py"])
+    ingest.main()
+
+    summary_path = wiki_dir / "summaries" / "demo.md"
+    assert summary_path.read_text(encoding="utf-8") == expected_summary
+    manifest = json.loads((state_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert "raw/inbox/demo.md" in manifest["files"]
+    assert manifest["files"]["raw/inbox/demo.md"]["topic_slugs"] == ["agent-router", "capability-registry"]
+    run_summary = json.loads((state_dir / "last_ingest_run.json").read_text(encoding="utf-8"))
+    assert run_summary["processed"] == 1
+    assert run_summary["page_stats"]["topics"] == 2
+    event_lines = (state_dir / "ingest_events.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(event_lines) == 2
+    assert json.loads(event_lines[0])["event"] == "ingest_file_started"
+    assert json.loads(event_lines[1])["event"] == "ingest_file_completed"
+    assert (state_dir / "last_ingest_report.md").exists()
+
+
+def test_ingest_dry_run_reports_actions_without_writing(tmp_path, monkeypatch):
+    root = tmp_path
+    raw_dir = root / "raw" / "inbox"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "demo.md").write_text("hello", encoding="utf-8")
+    (root / ".wikiignore").write_text("", encoding="utf-8")
+    (root / "schemas").mkdir()
+    (root / "schemas" / "AGENTS.md").write_text("schema", encoding="utf-8")
+    (root / "ingest-settings.json").write_text(Path("ingest-settings.json").read_text(encoding="utf-8"), encoding="utf-8")
+
+    monkeypatch.setattr(ingest, "ROOT", root)
+    monkeypatch.setattr(ingest, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(ingest, "WIKI_DIR", root / "wiki")
+    monkeypatch.setattr(ingest, "SUMMARIES_DIR", root / "wiki" / "summaries")
+    monkeypatch.setattr(ingest, "TOPICS_DIR", root / "wiki" / "topics")
+    monkeypatch.setattr(ingest, "ENTITIES_DIR", root / "wiki" / "entities")
+    monkeypatch.setattr(ingest, "STATE_DIR", root / "state")
+    monkeypatch.setattr(ingest, "MANIFEST_PATH", root / "state" / "manifest.json")
+    monkeypatch.setattr(ingest, "INDEX_PATH", root / "index.md")
+    monkeypatch.setattr(ingest, "LOG_PATH", root / "log.md")
+    monkeypatch.setattr(ingest, "SCHEMA_PATH", root / "schemas" / "AGENTS.md")
+    monkeypatch.setattr(ingest, "WIKIIGNORE_PATH", root / ".wikiignore")
+    monkeypatch.setattr(ingest, "INGEST_FALLBACK_SETTINGS_PATH", root / "ingest-settings.json")
+    monkeypatch.setattr(ingest, "INGEST_SETTINGS_PATH", root / "ingest-settings.local.json")
+    monkeypatch.setattr(ingest, "LAST_INGEST_RUN_PATH", root / "state" / "last_ingest_run.json")
+    monkeypatch.setattr(ingest, "INGEST_EVENTS_PATH", root / "state" / "ingest_events.jsonl")
+    monkeypatch.setattr(ingest, "INGEST_REPORT_PATH", root / "state" / "last_ingest_report.md")
+
+    monkeypatch.setattr(sys, "argv", ["ingest.py", "--dry-run"])
+    ingest.main()
+
+    run_summary = json.loads((root / "state" / "last_ingest_run.json").read_text(encoding="utf-8"))
+    assert run_summary["status"] == "dry_run"
+    assert run_summary["would_process"] == ["demo.md"]
+    assert not (root / "wiki" / "summaries").exists()
+    assert not (root / "state" / "ingest_events.jsonl").exists()
+    assert (root / "state" / "last_ingest_report.md").exists()
+
+
+def test_ingest_reconcile_resets_stale_outputs(tmp_path, monkeypatch):
+    root = tmp_path
+    raw_dir = root / "raw" / "inbox"
+    wiki_dir = root / "wiki"
+    state_dir = root / "state"
+    schemas_dir = root / "schemas"
+    raw_dir.mkdir(parents=True)
+    (wiki_dir / "summaries").mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    schemas_dir.mkdir(parents=True)
+    (raw_dir / "fresh.md").write_text("fresh", encoding="utf-8")
+    (wiki_dir / "summaries" / "stale.md").write_text("old", encoding="utf-8")
+    (state_dir / "manifest.json").write_text(
+        json.dumps({"files": {"raw/inbox/stale.md": {"sha256": "old"}}}),
+        encoding="utf-8",
+    )
+    (root / ".wikiignore").write_text("", encoding="utf-8")
+    (schemas_dir / "AGENTS.md").write_text("schema", encoding="utf-8")
+    (root / "ingest-settings.json").write_text(Path("ingest-settings.json").read_text(encoding="utf-8"), encoding="utf-8")
+
+    monkeypatch.setattr(ingest, "ROOT", root)
+    monkeypatch.setattr(ingest, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(ingest, "WIKI_DIR", wiki_dir)
+    monkeypatch.setattr(ingest, "SUMMARIES_DIR", wiki_dir / "summaries")
+    monkeypatch.setattr(ingest, "TOPICS_DIR", wiki_dir / "topics")
+    monkeypatch.setattr(ingest, "ENTITIES_DIR", wiki_dir / "entities")
+    monkeypatch.setattr(ingest, "STATE_DIR", state_dir)
+    monkeypatch.setattr(ingest, "MANIFEST_PATH", state_dir / "manifest.json")
+    monkeypatch.setattr(ingest, "INDEX_PATH", root / "index.md")
+    monkeypatch.setattr(ingest, "LOG_PATH", root / "log.md")
+    monkeypatch.setattr(ingest, "SCHEMA_PATH", schemas_dir / "AGENTS.md")
+    monkeypatch.setattr(ingest, "WIKIIGNORE_PATH", root / ".wikiignore")
+    monkeypatch.setattr(ingest, "INGEST_FALLBACK_SETTINGS_PATH", root / "ingest-settings.json")
+    monkeypatch.setattr(ingest, "INGEST_SETTINGS_PATH", root / "ingest-settings.local.json")
+    monkeypatch.setattr(ingest, "LAST_INGEST_RUN_PATH", state_dir / "last_ingest_run.json")
+    monkeypatch.setattr(ingest, "INGEST_EVENTS_PATH", state_dir / "ingest_events.jsonl")
+    monkeypatch.setattr(ingest, "INGEST_REPORT_PATH", state_dir / "last_ingest_report.md")
+    monkeypatch.setattr(ingest, "init_client", lambda: ("fake-client", "fake-model"))
+    monkeypatch.setattr(
+        ingest,
+        "call_claude_json",
+        lambda *args, **kwargs: {
+            "title": "Fresh",
+            "summary": "Fresh summary",
+            "key_facts": [],
+            "topics": [],
+            "entities": [],
+            "open_questions": [],
+            "topic_summaries": {},
+            "entity_summaries": {},
+        },
+    )
+
+    monkeypatch.setattr(sys, "argv", ["ingest.py", "--reconcile"])
+    ingest.main()
+
+    assert not (wiki_dir / "summaries" / "stale.md").exists()
+    assert (wiki_dir / "summaries" / "fresh.md").exists()
+
+
+def test_ingest_cleans_stale_manifest_entries_without_full_reconcile(tmp_path, monkeypatch):
+    root = tmp_path
+    raw_dir = root / "raw" / "inbox"
+    wiki_dir = root / "wiki"
+    state_dir = root / "state"
+    schemas_dir = root / "schemas"
+    raw_dir.mkdir(parents=True)
+    (wiki_dir / "summaries").mkdir(parents=True)
+    (wiki_dir / "topics").mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    schemas_dir.mkdir(parents=True)
+    (raw_dir / "fresh.md").write_text("fresh", encoding="utf-8")
+    (wiki_dir / "summaries" / "stale.md").write_text("old", encoding="utf-8")
+    ingest.upsert_source_contribution(wiki_dir / "topics" / "legacy-topic.md", "stale.md", "# Legacy")
+    (state_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "files": {
+                    "raw/inbox/stale.md": {
+                        "sha256": "old",
+                        "summary_path": "wiki/summaries/stale.md",
+                        "topic_slugs": ["legacy-topic"],
+                        "entity_slugs": [],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / ".wikiignore").write_text("", encoding="utf-8")
+    (schemas_dir / "AGENTS.md").write_text("schema", encoding="utf-8")
+    (root / "ingest-settings.json").write_text(Path("ingest-settings.json").read_text(encoding="utf-8"), encoding="utf-8")
+
+    monkeypatch.setattr(ingest, "ROOT", root)
+    monkeypatch.setattr(ingest, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(ingest, "WIKI_DIR", wiki_dir)
+    monkeypatch.setattr(ingest, "SUMMARIES_DIR", wiki_dir / "summaries")
+    monkeypatch.setattr(ingest, "TOPICS_DIR", wiki_dir / "topics")
+    monkeypatch.setattr(ingest, "ENTITIES_DIR", wiki_dir / "entities")
+    monkeypatch.setattr(ingest, "STATE_DIR", state_dir)
+    monkeypatch.setattr(ingest, "MANIFEST_PATH", state_dir / "manifest.json")
+    monkeypatch.setattr(ingest, "INDEX_PATH", root / "index.md")
+    monkeypatch.setattr(ingest, "LOG_PATH", root / "log.md")
+    monkeypatch.setattr(ingest, "SCHEMA_PATH", schemas_dir / "AGENTS.md")
+    monkeypatch.setattr(ingest, "WIKIIGNORE_PATH", root / ".wikiignore")
+    monkeypatch.setattr(ingest, "INGEST_FALLBACK_SETTINGS_PATH", root / "ingest-settings.json")
+    monkeypatch.setattr(ingest, "INGEST_SETTINGS_PATH", root / "ingest-settings.local.json")
+    monkeypatch.setattr(ingest, "LAST_INGEST_RUN_PATH", state_dir / "last_ingest_run.json")
+    monkeypatch.setattr(ingest, "INGEST_EVENTS_PATH", state_dir / "ingest_events.jsonl")
+    monkeypatch.setattr(ingest, "INGEST_REPORT_PATH", state_dir / "last_ingest_report.md")
+    monkeypatch.setattr(ingest, "init_client", lambda: ("fake-client", "fake-model"))
+    monkeypatch.setattr(
+        ingest,
+        "call_claude_json",
+        lambda *args, **kwargs: {
+            "title": "Fresh",
+            "summary": "Fresh summary",
+            "key_facts": [],
+            "topics": [],
+            "entities": [],
+            "open_questions": [],
+            "topic_summaries": {},
+            "entity_summaries": {},
+        },
+    )
+
+    monkeypatch.setattr(sys, "argv", ["ingest.py"])
+    ingest.main()
+
+    run_summary = json.loads((state_dir / "last_ingest_run.json").read_text(encoding="utf-8"))
+    assert run_summary["reconciled"] is False
+    assert run_summary["cleaned_stale"]["manifest_entries"] == 1
+    assert not (wiki_dir / "summaries" / "stale.md").exists()
+    assert not (wiki_dir / "topics" / "legacy-topic.md").exists()
+
+
+def test_ingest_updates_source_contributions_when_topics_change(tmp_path, monkeypatch):
+    root = tmp_path
+    raw_dir = root / "raw" / "inbox"
+    wiki_dir = root / "wiki"
+    state_dir = root / "state"
+    schemas_dir = root / "schemas"
+    raw_dir.mkdir(parents=True)
+    (wiki_dir / "topics").mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    schemas_dir.mkdir(parents=True)
+    (raw_dir / "demo.md").write_text("demo", encoding="utf-8")
+    (root / ".wikiignore").write_text("", encoding="utf-8")
+    (schemas_dir / "AGENTS.md").write_text("schema", encoding="utf-8")
+    (root / "ingest-settings.json").write_text(Path("ingest-settings.json").read_text(encoding="utf-8"), encoding="utf-8")
+
+    monkeypatch.setattr(ingest, "ROOT", root)
+    monkeypatch.setattr(ingest, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(ingest, "WIKI_DIR", wiki_dir)
+    monkeypatch.setattr(ingest, "SUMMARIES_DIR", wiki_dir / "summaries")
+    monkeypatch.setattr(ingest, "TOPICS_DIR", wiki_dir / "topics")
+    monkeypatch.setattr(ingest, "ENTITIES_DIR", wiki_dir / "entities")
+    monkeypatch.setattr(ingest, "STATE_DIR", state_dir)
+    monkeypatch.setattr(ingest, "MANIFEST_PATH", state_dir / "manifest.json")
+    monkeypatch.setattr(ingest, "INDEX_PATH", root / "index.md")
+    monkeypatch.setattr(ingest, "LOG_PATH", root / "log.md")
+    monkeypatch.setattr(ingest, "SCHEMA_PATH", schemas_dir / "AGENTS.md")
+    monkeypatch.setattr(ingest, "WIKIIGNORE_PATH", root / ".wikiignore")
+    monkeypatch.setattr(ingest, "INGEST_FALLBACK_SETTINGS_PATH", root / "ingest-settings.json")
+    monkeypatch.setattr(ingest, "INGEST_SETTINGS_PATH", root / "ingest-settings.local.json")
+    monkeypatch.setattr(ingest, "LAST_INGEST_RUN_PATH", state_dir / "last_ingest_run.json")
+    monkeypatch.setattr(ingest, "INGEST_EVENTS_PATH", state_dir / "ingest_events.jsonl")
+    monkeypatch.setattr(ingest, "INGEST_REPORT_PATH", state_dir / "last_ingest_report.md")
+    monkeypatch.setattr(ingest, "get_schema_text", lambda: "schema")
+
+    responses = iter(
+        [
+            {
+                "title": "Demo",
+                "summary": "First pass",
+                "key_facts": [],
+                "topics": ["Alpha Topic"],
+                "entities": [],
+                "open_questions": [],
+                "topic_summaries": {"Alpha Topic": "Alpha"},
+                "entity_summaries": {},
+            },
+            {
+                "title": "Demo",
+                "summary": "Second pass",
+                "key_facts": [],
+                "topics": ["Beta Topic"],
+                "entities": [],
+                "open_questions": [],
+                "topic_summaries": {"Beta Topic": "Beta"},
+                "entity_summaries": {},
+            },
+        ]
+    )
+    monkeypatch.setattr(ingest, "call_claude_json", lambda *args, **kwargs: next(responses))
+
+    result_one = ingest.ingest_file("fake-client", "fake-model", raw_dir / "demo.md", ingest.load_ingest_settings())
+    result_two = ingest.ingest_file(
+        "fake-client",
+        "fake-model",
+        raw_dir / "demo.md",
+        ingest.load_ingest_settings(),
+        previous_record=result_one,
+    )
+
+    assert result_two["topic_slugs"] == ["beta-topic"]
+    assert not (wiki_dir / "topics" / "alpha-topic.md").exists()
+    beta_content = (wiki_dir / "topics" / "beta-topic.md").read_text(encoding="utf-8")
+    assert "<!-- SOURCE:demo.md -->" in beta_content
+
+
+# --- HTML extraction tests (LWC-wyli) ---
+
+
+def test_extract_html_text_strips_tags_and_returns_text(tmp_path):
+    html_file = tmp_path / "sample.html"
+    html_file.write_text(
+        "<html><body><h1>Title</h1><p>Hello <b>world</b></p></body></html>",
+        encoding="utf-8",
+    )
+    result = ingest.extract_html_text(html_file)
+    assert "Title" in result
+    assert "Hello" in result
+    assert "world" in result
+    assert "<h1>" not in result
+    assert "<p>" not in result
+    assert "<b>" not in result
+
+
+def test_extract_html_text_excludes_script_and_style(tmp_path):
+    html_file = tmp_path / "scripted.html"
+    html_file.write_text(
+        "<html><head><style>body { color: red; }</style>"
+        "<script>alert('hi');</script></head>"
+        "<body><p>Visible text</p></body></html>",
+        encoding="utf-8",
+    )
+    result = ingest.extract_html_text(html_file)
+    assert "Visible text" in result
+    assert "color: red" not in result
+    assert "alert" not in result
+
+
+def test_extract_html_text_empty_html_returns_placeholder(tmp_path):
+    html_file = tmp_path / "empty.html"
+    html_file.write_text("<html><body></body></html>", encoding="utf-8")
+    result = ingest.extract_html_text(html_file)
+    assert result == "[HTML parsed but no extractable text found: empty.html]"
+
+
+def test_extract_html_text_tags_only_returns_placeholder(tmp_path):
+    html_file = tmp_path / "tags_only.html"
+    html_file.write_text(
+        "<html><head><title></title></head><body><div><span></span></div></body></html>",
+        encoding="utf-8",
+    )
+    result = ingest.extract_html_text(html_file)
+    assert result == "[HTML parsed but no extractable text found: tags_only.html]"
+
+
+def test_extract_text_dispatches_htm_extension(tmp_path):
+    htm_file = tmp_path / "page.htm"
+    htm_file.write_text(
+        "<html><body><p>HTM content</p></body></html>",
+        encoding="utf-8",
+    )
+    result = ingest.extract_text(htm_file)
+    assert "HTM content" in result
+
+
+def test_extract_text_dispatches_html_extension(tmp_path):
+    html_file = tmp_path / "page.html"
+    html_file.write_text(
+        "<html><body><p>HTML content</p></body></html>",
+        encoding="utf-8",
+    )
+    result = ingest.extract_text(html_file)
+    assert "HTML content" in result
+
+
+def test_extract_html_text_latin1_fallback(tmp_path):
+    html_file = tmp_path / "latin1.html"
+    # Write bytes that are valid Latin-1 but invalid UTF-8
+    html_file.write_bytes(
+        b"<html><body><p>caf\xe9</p></body></html>"
+    )
+    result = ingest.extract_html_text(html_file)
+    assert "caf" in result
