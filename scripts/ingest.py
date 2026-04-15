@@ -435,6 +435,22 @@ def extract_rst_text(path: Path) -> str:
     return text
 
 
+def extract_docx_text(path: Path) -> str:
+    try:
+        from docx import Document
+    except ImportError:
+        return "[DOCX support requires python-docx: pip install python-docx]"
+    try:
+        doc = Document(str(path))
+    except Exception as exc:
+        return f"[DOCX parsing failed for {path.name}: {exc}]"
+    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+    text = "\n".join(paragraphs).strip()
+    if not text:
+        return f"[DOCX parsed but no extractable text found: {path.name}]"
+    return text
+
+
 def extract_text(path: Path) -> str:
     ext = path.suffix.lower()
     if ext in {".txt", ".md", ".py", ".json", ".yaml", ".yml", ".csv"}:
@@ -445,6 +461,8 @@ def extract_text(path: Path) -> str:
         return extract_html_text(path)
     if ext == ".rst":
         return extract_rst_text(path)
+    if ext == ".docx":
+        return extract_docx_text(path)
     return f"[Unsupported file type for direct parsing: {path.name}]"
 
 def init_client() -> tuple[anthropic.Anthropic, str]:

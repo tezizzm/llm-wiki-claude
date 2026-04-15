@@ -726,3 +726,91 @@ def test_extract_rst_text_missing_docutils(tmp_path, monkeypatch):
     finally:
         # Restore docutils modules so other tests are not affected
         _sys.modules.update(saved_modules)
+
+
+# ---------- DOCX extraction tests ----------
+
+def test_extract_docx_text_multiple_paragraphs(tmp_path):
+    """Integration test: DOCX with multiple paragraphs -> text extracted."""
+    from docx import Document as DocxDocument
+    docx_file = tmp_path / "sample.docx"
+    doc = DocxDocument()
+    doc.add_paragraph("First paragraph of the document.")
+    doc.add_paragraph("Second paragraph with more content.")
+    doc.add_paragraph("Third and final paragraph.")
+    doc.save(str(docx_file))
+
+    result = ingest.extract_docx_text(docx_file)
+    assert "First paragraph of the document." in result
+    assert "Second paragraph with more content." in result
+    assert "Third and final paragraph." in result
+    # Paragraphs should be joined with newlines
+    assert "\n" in result
+
+
+def test_extract_docx_text_empty_returns_placeholder(tmp_path):
+    """Integration test: empty DOCX -> placeholder returned."""
+    from docx import Document as DocxDocument
+    docx_file = tmp_path / "empty.docx"
+    doc = DocxDocument()
+    doc.save(str(docx_file))
+
+    result = ingest.extract_docx_text(docx_file)
+    assert result == "[DOCX parsed but no extractable text found: empty.docx]"
+
+
+def test_extract_text_dispatches_docx_extension(tmp_path):
+    """extract_text() dispatches .docx to extract_docx_text()."""
+    from docx import Document as DocxDocument
+    docx_file = tmp_path / "routed.docx"
+    doc = DocxDocument()
+    doc.add_paragraph("Dispatch test content.")
+    doc.save(str(docx_file))
+
+    result = ingest.extract_text(docx_file)
+    assert "Dispatch test content." in result
+
+
+def test_extract_docx_text_missing_python_docx(tmp_path, monkeypatch):
+    """When python-docx is not installed, returns graceful message."""
+    from docx import Document as DocxDocument
+    docx_file = tmp_path / "nodeps.docx"
+    doc = DocxDocument()
+    doc.add_paragraph("Content here.")
+    doc.save(str(docx_file))
+
+    # Remove cached docx modules so the function re-imports
+    import sys as _sys
+    saved_modules = {}
+    for mod_name in list(_sys.modules):
+        if mod_name.startswith("docx"):
+            saved_modules[mod_name] = _sys.modules.pop(mod_name)
+
+    import builtins
+    real_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if name == "docx" or name.startswith("docx."):
+            raise ImportError("No module named 'docx'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+    try:
+        result = ingest.extract_docx_text(docx_file)
+        assert result == "[DOCX support requires python-docx: pip install python-docx]"
+    finally:
+        _sys.modules.update(saved_modules)
+
+
+def test_extract_docx_text_whitespace_only_paragraphs(tmp_path):
+    """DOCX with only whitespace paragraphs returns placeholder."""
+    from docx import Document as DocxDocument
+    docx_file = tmp_path / "whitespace.docx"
+    doc = DocxDocument()
+    doc.add_paragraph("   ")
+    doc.add_paragraph("\t")
+    doc.add_paragraph("")
+    doc.save(str(docx_file))
+
+    result = ingest.extract_docx_text(docx_file)
+    assert result == "[DOCX parsed but no extractable text found: whitespace.docx]"
