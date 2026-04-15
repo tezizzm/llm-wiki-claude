@@ -1,0 +1,18 @@
+# Ignore common OS and editor junk
+.DS_Store
+**/.DS_Store
+._*
+Thumbs.db
+*.swp
+*.tmp
+*.bak
+
+# Python noise
+__pycache__
+
+# Low-signal workflow artifacts from agent-mesh issue generation
+raw/inbox/AM-*.md
+raw/inbox/*review_checklist*.md
+raw/inbox/*review_for_claude*.md
+raw/inbox/*_review_*.md
+raw/inbox/*claude_prompt*.md

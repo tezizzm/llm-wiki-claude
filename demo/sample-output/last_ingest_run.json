@@ -1,0 +1,39 @@
+{
+  "ran_at_utc": "2026-04-14T18:30:00Z",
+  "status": "completed",
+  "model": "claude-haiku-4-5",
+  "settings_path": "ingest-settings.json",
+  "raw_candidates": 2,
+  "reconciled": true,
+  "cleaned_stale": {
+    "summaries": 0,
+    "topics": 0,
+    "entities": 0,
+    "manifest_entries": 0
+  },
+  "merge_cleanup": {
+    "topic_alias_merges": 0,
+    "entity_alias_merges": 0,
+    "topic_normalizations": 0,
+    "entity_normalizations": 0,
+    "topic_low_value_prunes": 0,
+    "entity_low_value_prunes": 0
+  },
+  "stale_manifest_entries": [],
+  "processed": 2,
+  "processed_files": [
+    "demo-architecture.md",
+    "demo-product.md"
+  ],
+  "skipped_low_signal": 0,
+  "skipped_unchanged": 0,
+  "skipped_duplicates": 0,
+  "page_stats": {
+    "summaries": 2,
+    "topics": 2,
+    "entities": 2,
+    "topic_contributions": 3,
+    "entity_contributions": 2
+  },
+  "errors": []
+}

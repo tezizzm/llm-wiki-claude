@@ -1,0 +1,35 @@
+# macOS / editor noise
+.DS_Store
+._*
+Thumbs.db
+*.swp
+*.tmp
+*.bak
+
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Local secrets
+.env
+ingest-settings.local.json
+sync-sources.local.json
+
+# Synced source corpus and generated wiki artifacts
+raw/inbox/
+wiki/
+index.md
+log.md
+
+# Local runtime state
+state/*.json
+
+# Paivot backlog (local tooling)
+.vault/
+
+# D&F planning artifacts (local only)
+BUSINESS.md
+DESIGN.md
+ARCHITECTURE.md
