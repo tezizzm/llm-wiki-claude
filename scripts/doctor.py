@@ -11,6 +11,7 @@ from scripts.config_models import IngestSettingsConfig, SyncConfig
 from scripts.version import read_version
 
 ROOT = Path(__file__).resolve().parents[1]
+GENERIC_SYNC_ROOT_PLACEHOLDER = "/absolute/path/to/your/project"
 
 
 def main() -> int:
@@ -67,8 +68,11 @@ def main() -> int:
     if sync_valid and prepared_sync is not None:
         validated = SyncConfig.model_validate(prepared_sync)
         unreachable = []
+        generic_placeholders = []
         for source in validated.sources:
-            if not Path(source.root).expanduser().is_dir():
+            if source.root == GENERIC_SYNC_ROOT_PLACEHOLDER:
+                generic_placeholders.append((source.root, source.name))
+            elif not Path(source.root).expanduser().is_dir():
                 unreachable.append((source.root, source.name))
         if unreachable:
             ok = False
@@ -76,6 +80,9 @@ def main() -> int:
             for root, name in unreachable:
                 messages.append(f"       - {root} (source: {name})")
             messages.append(f"       Hint: Check the \"root\" values in {sync_path}.")
+        elif generic_placeholders:
+            messages.append("[WARN] Source paths -- using the generic tracked template placeholder")
+            messages.append("       Hint: Copy sync-sources.json to sync-sources.local.json and replace the placeholder root with your real local source path.")
         else:
             messages.append("[PASS] Source paths -- all source roots reachable")
 

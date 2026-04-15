@@ -155,6 +155,31 @@ def test_source_paths_fail(tmp_path, monkeypatch, capsys):
     assert code == 1
 
 
+def test_source_paths_warn_for_generic_tracked_template(tmp_path, monkeypatch, capsys):
+    """The publishable tracked template should warn, not fail, when it still has the generic placeholder root."""
+    sync_config = {
+        "schema_version": 1,
+        "sources": [
+            {"name": "my-project", "root": "/absolute/path/to/your/project"},
+        ],
+    }
+    sync_path = tmp_path / "sync-sources.json"
+    sync_path.write_text(json.dumps(sync_config))
+
+    monkeypatch.setattr(doctor, "ROOT", tmp_path)
+    _setup_env(tmp_path)
+    _setup_ingest(tmp_path, monkeypatch)
+    _setup_demo(tmp_path)
+    _setup_sync(sync_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    code = doctor.main()
+    output = capsys.readouterr().out
+    assert "[WARN] Source paths -- using the generic tracked template placeholder" in output
+    assert "sync-sources.local.json" in output
+    assert code == 0
+
+
 def test_source_paths_skipped_when_sync_invalid(tmp_path, monkeypatch, capsys):
     """When sync config is invalid, source path check is skipped (not failed)."""
     sync_path = tmp_path / "sync-sources.json"
