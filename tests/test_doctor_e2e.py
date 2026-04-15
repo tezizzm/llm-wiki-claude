@@ -133,23 +133,23 @@ class TestAllPassValidSetup:
 
 
 # ---------------------------------------------------------------------------
-# AC-2: missing .env -> [FAIL] Environment, exit code 1
+# AC-2: missing .env -> [WARN] Environment (capability advisory), exit code 0
 # ---------------------------------------------------------------------------
 
 class TestMissingEnv:
-    """AC-2: missing .env -> [FAIL] Environment in output, exit 1."""
+    """AC-2: missing .env -> [WARN] Environment in output, exit 0 (not a structural failure)."""
 
-    def test_exit_code_one(self, tmp_path, monkeypatch, capsys):
+    def test_exit_code_zero(self, tmp_path, monkeypatch, capsys):
         _setup_valid_project(tmp_path, monkeypatch)
         (tmp_path / ".env").unlink()
         code, _ = _run_doctor(capsys)
-        assert code == 1
+        assert code == 0
 
-    def test_fail_environment_in_output(self, tmp_path, monkeypatch, capsys):
+    def test_warn_environment_in_output(self, tmp_path, monkeypatch, capsys):
         _setup_valid_project(tmp_path, monkeypatch)
         (tmp_path / ".env").unlink()
         _, output = _run_doctor(capsys)
-        assert "[FAIL] Environment" in output
+        assert "[WARN] Environment" in output
 
     def test_hint_present(self, tmp_path, monkeypatch, capsys):
         _setup_valid_project(tmp_path, monkeypatch)
@@ -236,8 +236,8 @@ class TestConsistentPrefixes:
                 f"Check line has unexpected prefix: {line}"
             )
 
-    def test_mixed_pass_fail_prefix_format(self, tmp_path, monkeypatch, capsys):
-        """With a broken env, remaining checks still use [PASS]/[FAIL]."""
+    def test_mixed_pass_warn_prefix_format(self, tmp_path, monkeypatch, capsys):
+        """With a missing env, output uses [PASS] and [WARN] (not [FAIL])."""
         _setup_valid_project(tmp_path, monkeypatch)
         (tmp_path / ".env").unlink()
 
@@ -250,13 +250,13 @@ class TestConsistentPrefixes:
         ]
         assert len(check_lines) >= 2, "Expected multiple check lines"
         has_pass = any(l.strip().startswith("[PASS]") for l in check_lines)
-        has_fail = any(l.strip().startswith("[FAIL]") for l in check_lines)
+        has_warn = any(l.strip().startswith("[WARN]") for l in check_lines)
         assert has_pass, "Expected at least one [PASS] line"
-        assert has_fail, "Expected at least one [FAIL] line"
+        assert has_warn, "Expected at least one [WARN] line"
 
         for line in check_lines:
             stripped = line.strip()
-            assert stripped.startswith("[PASS]") or stripped.startswith("[FAIL]"), (
+            assert stripped.startswith("[PASS]") or stripped.startswith("[WARN]"), (
                 f"Check line has unexpected prefix: {line}"
             )
 
@@ -273,7 +273,7 @@ class TestHintMessages:
         (tmp_path / ".env").unlink()
         _, output = _run_doctor(capsys)
 
-        assert "[FAIL] Environment" in output
+        assert "[WARN] Environment" in output
         assert "Hint:" in output
 
     def test_hint_for_placeholder_key(self, tmp_path, monkeypatch, capsys):
@@ -283,7 +283,7 @@ class TestHintMessages:
         )
         _, output = _run_doctor(capsys)
 
-        assert "[FAIL] Environment" in output
+        assert "[WARN] Environment" in output
         assert "Hint:" in output
 
     def test_hint_for_unreachable_source(self, tmp_path, monkeypatch, capsys):

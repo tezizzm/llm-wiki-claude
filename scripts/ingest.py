@@ -5,7 +5,7 @@ import json
 import hashlib
 import shutil
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from fnmatch import fnmatch
 from html.parser import HTMLParser
@@ -521,7 +521,7 @@ def write_markdown(path: Path, content: str) -> None:
 def append_event(event_type: str, **fields: Any) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
-        "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+        "timestamp_utc": datetime.now(timezone.utc).isoformat() + "Z",
         "event": event_type,
         **fields,
     }
@@ -529,7 +529,7 @@ def append_event(event_type: str, **fields: Any) -> None:
         f.write(json.dumps(payload) + "\n")
 
 def append_log(message: str) -> None:
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     with LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(f"- {timestamp} {message}\n")
 
@@ -675,7 +675,7 @@ def build_summary_markdown(
     entities: List[str],
     open_questions: List[str],
 ) -> str:
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     topics_links = "\n".join([f"- [[{slugify(t)}]]" for t in topics]) or "- None"
     entity_links = "\n".join([f"- [[{slugify(e)}]]" for e in entities]) or "- None"
     facts = "\n".join([f"- {x}" for x in key_facts]) or "- None"
@@ -709,7 +709,7 @@ def build_topic_markdown(
     related_entities: List[str],
     related_topics: List[str],
 ) -> str:
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     ent = "\n".join([f"- [[{slugify(e)}]]" for e in related_entities]) or "- None"
     rel = "\n".join(
         [f"- [[{slugify(t)}]]" for t in related_topics if slugify(t) != slugify(topic)]
@@ -736,7 +736,7 @@ def build_entity_markdown(
     summary: str,
     related_topics: List[str],
 ) -> str:
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rel = "\n".join([f"- [[{slugify(t)}]]" for t in related_topics]) or "- None"
 
     return f"""# {entity}
@@ -1097,7 +1097,7 @@ def main() -> None:
         print("No files found in raw/inbox/")
         save_last_ingest_run(
             {
-                "ran_at_utc": datetime.utcnow().isoformat() + "Z",
+                "ran_at_utc": datetime.now(timezone.utc).isoformat() + "Z",
                 "status": "no_input",
                 "raw_candidates": 0,
                 "processed": 0,
@@ -1109,7 +1109,7 @@ def main() -> None:
 
     if args.dry_run:
         run_summary = {
-            "ran_at_utc": datetime.utcnow().isoformat() + "Z",
+            "ran_at_utc": datetime.now(timezone.utc).isoformat() + "Z",
             "status": "dry_run",
             "settings_path": str(settings_path),
             "raw_candidates": len(files),
@@ -1148,7 +1148,7 @@ def main() -> None:
             continue
         manifest["files"][rel_path] = {
             "sha256": digest,
-            "last_ingested_utc": datetime.utcnow().isoformat() + "Z",
+            "last_ingested_utc": datetime.now(timezone.utc).isoformat() + "Z",
             "model": model,
             **ingest_result,
         }
@@ -1160,7 +1160,7 @@ def main() -> None:
     update_index()
     page_stats = collect_page_stats()
     run_summary = {
-        "ran_at_utc": datetime.utcnow().isoformat() + "Z",
+        "ran_at_utc": datetime.now(timezone.utc).isoformat() + "Z",
         "status": "completed_with_errors" if errors else "completed",
         "model": model,
         "settings_path": str(settings_path),

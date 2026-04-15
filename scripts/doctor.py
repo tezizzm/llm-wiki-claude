@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def main() -> int:
         ok = False
         messages.append(f"[FAIL] Python version -- {ver_str} (requires >= 3.9)")
 
-    # --- .env / API key check ---
+    # --- .env / API key check (capability advisory — does not affect exit code) ---
     env_path = ROOT / ".env"
     if env_path.exists():
         env_vars = dotenv_values(env_path)
@@ -36,13 +37,11 @@ def main() -> int:
         if api_key and api_key != "your_anthropic_api_key_here":
             messages.append("[PASS] Environment -- .env found with API key")
         else:
-            ok = False
-            messages.append("[FAIL] Environment -- ANTHROPIC_API_KEY is not set or still placeholder")
-            messages.append("       Hint: Set a real Anthropic API key in .env")
+            messages.append("[WARN] Environment -- ANTHROPIC_API_KEY is not set or still placeholder")
+            messages.append("       Hint: Set a real Anthropic API key in .env (required for ingest and query)")
     else:
-        ok = False
-        messages.append("[FAIL] Environment -- .env file not found")
-        messages.append("       Hint: Copy .env.example to .env and paste your Anthropic API key.")
+        messages.append("[WARN] Environment -- .env file not found")
+        messages.append("       Hint: Copy .env.example to .env and set your Anthropic API key (required for ingest and query)")
 
     # --- Sync config check (existing, reformatted) ---
     sync_path = sync.resolve_config_path()
@@ -98,21 +97,21 @@ def main() -> int:
         ok = False
         messages.append(f"[FAIL] Ingest settings -- missing ({ingest_path})")
 
-    # --- Wiki output directory check ---
+    # --- Wiki output directory check (read-only probe — does not create the directory) ---
     wiki_dir = ROOT / "wiki"
-    try:
-        wiki_dir.mkdir(parents=True, exist_ok=True)
-        messages.append("[PASS] Wiki output -- wiki/ directory ready")
-    except OSError:
+    if wiki_dir.is_dir():
+        messages.append("[PASS] Wiki output -- wiki/ directory exists")
+    elif not wiki_dir.exists() and os.access(ROOT, os.W_OK):
+        messages.append("[PASS] Wiki output -- wiki/ directory will be created on first run")
+    else:
         ok = False
         messages.append("[FAIL] Wiki output -- cannot create wiki/ directory")
         messages.append("       Hint: Check file permissions in the project root.")
 
-    # --- Demo artifacts check (existing, reformatted) ---
+    # --- Demo artifacts check ---
     demo_paths = [
-        Path("demo/sample-output/index.md"),
-        Path("demo/sample-output/last_ingest_run.json"),
-        Path("demo/sample-output/last_ingest_report.md"),
+        ROOT / "demo/sample-output/last_ingest_run.json",
+        ROOT / "demo/sample-output/last_ingest_report.md",
     ]
     missing_demo = [str(path) for path in demo_paths if not path.exists()]
     if missing_demo:

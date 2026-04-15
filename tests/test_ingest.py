@@ -273,7 +273,7 @@ def test_ingest_main_builds_expected_summary_from_fixture(tmp_path, monkeypatch)
 
     class FixedDateTime:
         @staticmethod
-        def utcnow():
+        def now(tz=None):
             return real_datetime(2026, 1, 2, 3, 4, 5)
 
     monkeypatch.setattr(ingest, "datetime", FixedDateTime)

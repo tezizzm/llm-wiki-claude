@@ -54,54 +54,49 @@ def test_env_pass_with_valid_key(tmp_path, monkeypatch, capsys):
     assert "[PASS] Environment -- .env found with API key" in output
 
 
-def test_env_fail_missing(tmp_path, monkeypatch, capsys):
-    """When .env does not exist, print FAIL with hint."""
+def test_env_warn_missing(tmp_path, monkeypatch, capsys):
+    """When .env does not exist, print WARN (capability advisory, not structural failure)."""
     _setup_minimal_project(tmp_path, monkeypatch)
-    # Remove .env created by _setup_minimal_project
     (tmp_path / ".env").unlink()
 
     code = doctor.main()
     output = capsys.readouterr().out
-    assert "[FAIL] Environment -- .env file not found" in output
-    assert "Hint: Copy .env.example to .env and paste your Anthropic API key." in output
-    assert code == 1
+    assert "[WARN] Environment -- .env file not found" in output
+    assert "required for ingest and query" in output
+    assert code == 0
 
 
-def test_env_fail_placeholder_key(tmp_path, monkeypatch, capsys):
-    """When .env has the placeholder key, print FAIL."""
+def test_env_warn_placeholder_key(tmp_path, monkeypatch, capsys):
+    """When .env has the placeholder key, print WARN (not FAIL)."""
     _setup_minimal_project(tmp_path, monkeypatch)
-    # Overwrite .env with placeholder key
     (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=your_anthropic_api_key_here\n")
 
     code = doctor.main()
     output = capsys.readouterr().out
-    assert "[FAIL] Environment -- ANTHROPIC_API_KEY is not set or still placeholder" in output
-    assert "Hint: Set a real Anthropic API key in .env" in output
-    assert code == 1
+    assert "[WARN] Environment -- ANTHROPIC_API_KEY is not set or still placeholder" in output
+    assert code == 0
 
 
-def test_env_fail_empty_key(tmp_path, monkeypatch, capsys):
-    """When .env has ANTHROPIC_API_KEY set to empty string, print FAIL."""
+def test_env_warn_empty_key(tmp_path, monkeypatch, capsys):
+    """When .env has ANTHROPIC_API_KEY set to empty string, print WARN."""
     _setup_minimal_project(tmp_path, monkeypatch)
-    # Overwrite .env with empty key
     (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=\n")
 
     code = doctor.main()
     output = capsys.readouterr().out
-    assert "[FAIL] Environment -- ANTHROPIC_API_KEY is not set or still placeholder" in output
-    assert code == 1
+    assert "[WARN] Environment -- ANTHROPIC_API_KEY is not set or still placeholder" in output
+    assert code == 0
 
 
-def test_env_fail_key_missing_from_file(tmp_path, monkeypatch, capsys):
-    """When .env exists but has no ANTHROPIC_API_KEY line, print FAIL."""
+def test_env_warn_key_missing_from_file(tmp_path, monkeypatch, capsys):
+    """When .env exists but has no ANTHROPIC_API_KEY line, print WARN."""
     _setup_minimal_project(tmp_path, monkeypatch)
-    # Overwrite .env with no API key
     (tmp_path / ".env").write_text("OTHER_VAR=hello\n")
 
     code = doctor.main()
     output = capsys.readouterr().out
-    assert "[FAIL] Environment -- ANTHROPIC_API_KEY is not set or still placeholder" in output
-    assert code == 1
+    assert "[WARN] Environment -- ANTHROPIC_API_KEY is not set or still placeholder" in output
+    assert code == 0
 
 
 # ---------------------------------------------------------------------------
@@ -190,19 +185,19 @@ def test_wiki_dir_pass_exists(tmp_path, monkeypatch, capsys):
 
     code = doctor.main()
     output = capsys.readouterr().out
-    assert "[PASS] Wiki output -- wiki/ directory ready" in output
+    assert "[PASS] Wiki output -- wiki/ directory exists" in output
 
 
-def test_wiki_dir_pass_created(tmp_path, monkeypatch, capsys):
-    """When wiki/ doesn't exist but can be created, print PASS."""
+def test_wiki_dir_pass_will_be_created(tmp_path, monkeypatch, capsys):
+    """When wiki/ doesn't exist but root is writable, print PASS and do NOT create the dir."""
     monkeypatch.setattr(doctor, "ROOT", tmp_path)
     _setup_minimal_project(tmp_path, monkeypatch)
 
     assert not (tmp_path / "wiki").exists()
     code = doctor.main()
     output = capsys.readouterr().out
-    assert "[PASS] Wiki output -- wiki/ directory ready" in output
-    assert (tmp_path / "wiki").is_dir()
+    assert "[PASS] Wiki output -- wiki/ directory will be created on first run" in output
+    assert not (tmp_path / "wiki").exists()  # doctor must not create the directory
 
 
 def test_wiki_dir_fail(tmp_path, monkeypatch, capsys):
@@ -279,10 +274,9 @@ def _setup_ingest(tmp_path: Path, monkeypatch) -> None:
 
 
 def _setup_demo(tmp_path: Path) -> None:
-    """Create demo artifact files."""
+    """Create demo artifact files (only the tracked ones)."""
     demo_dir = tmp_path / "demo" / "sample-output"
     demo_dir.mkdir(parents=True)
-    (demo_dir / "index.md").write_text("# Demo")
     (demo_dir / "last_ingest_run.json").write_text("{}")
     (demo_dir / "last_ingest_report.md").write_text("# Report")
 

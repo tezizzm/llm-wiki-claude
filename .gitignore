@@ -20,8 +20,8 @@ sync-sources.local.json
 # Synced source corpus and generated wiki artifacts
 raw/inbox/
 wiki/
-index.md
-log.md
+/index.md
+/log.md
 
 # Local runtime state
 state/*.json
