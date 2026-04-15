@@ -29,7 +29,5 @@ state/*.json
 # Paivot backlog (local tooling)
 .vault/
 
-# D&F planning artifacts (local only)
-BUSINESS.md
-DESIGN.md
-ARCHITECTURE.md
+# Local working docs
+local-notes/
