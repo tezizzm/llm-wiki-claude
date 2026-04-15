@@ -16,7 +16,8 @@ def main(argv=None) -> None:
     ingest_parser = subparsers.add_parser("ingest", help="Build wiki artifacts from raw sources.")
     ingest_parser.add_argument("ingest_args", nargs=argparse.REMAINDER)
 
-    subparsers.add_parser("query", help="Ask a question against the local wiki.")
+    query_parser = subparsers.add_parser("query", help="Ask a question against the local wiki.")
+    query_parser.add_argument("query_args", nargs=argparse.REMAINDER)
     subparsers.add_parser("lint", help="Lint the generated wiki.")
     subparsers.add_parser("doctor", help="Validate local config, versioning, and demo artifact readiness.")
 
@@ -38,6 +39,7 @@ def main(argv=None) -> None:
         ingest.main()
         return
     if args.command == "query":
+        sys.argv = ["query.py", *args.query_args]
         query.main()
         return
     if args.command == "lint":
