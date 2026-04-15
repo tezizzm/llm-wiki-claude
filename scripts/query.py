@@ -103,8 +103,7 @@ def main():
         return
 
     # Interactive TTY mode: prompt loop
-    print("llm-wiki query (interactive mode)")
-    print("Type your question and press Enter. Type 'exit' or 'quit' to leave.\n")
+    print("llm-wiki query (interactive) -- type \"exit\" or Ctrl-D to quit")
     first_answer = True
     while True:
         try:

@@ -100,7 +100,7 @@ def test_interactive_mode_banner_and_prompt(capsys):
         query.main()
 
     out = capsys.readouterr().out
-    assert "llm-wiki query (interactive mode)" in out
+    assert "llm-wiki query (interactive) -- type \"exit\" or Ctrl-D to quit" in out
     assert "Interactive answer." in out
     assert "[Model: test-model]" in out
 
@@ -169,7 +169,7 @@ def test_interactive_mode_ctrl_d_exits(capsys):
         query.main()
 
     out = capsys.readouterr().out
-    assert "llm-wiki query (interactive mode)" in out
+    assert "llm-wiki query (interactive) -- type \"exit\" or Ctrl-D to quit" in out
 
 
 # ---------------------------------------------------------------------------
