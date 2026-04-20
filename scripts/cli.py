@@ -13,6 +13,7 @@ resolved once per invocation, banner is emitted to stdout when the source is
 import argparse
 import os
 import sys
+from typing import Callable
 
 from scripts import doctor, ingest, lint, query, sync
 from scripts.version import read_version
@@ -150,6 +151,20 @@ def _print_verbose_resolution_block(workspace: WorkspacePaths) -> None:
     print()  # trailing blank line before subcommand output
 
 
+# ---------------------------------------------------------------------------
+# DISPATCH registry (DESIGN §5)
+# ---------------------------------------------------------------------------
+#
+# Maps subcommand name -> workspace-aware entry point with the shared
+# signature ``fn(argv_rest: list[str], workspace: WorkspacePaths) -> int``.
+# Subcommands are migrated into this registry story by story; the legacy
+# ``sys.argv`` dispatch below continues to service anything not yet wired.
+
+DISPATCH: dict[str, Callable[[list[str], WorkspacePaths], int]] = {
+    "doctor": doctor.main,
+}
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for subcommand dispatch.
 
@@ -253,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "lint":
         raise SystemExit(lint.main())
     if args.command == "doctor":
-        raise SystemExit(doctor.main())
+        raise SystemExit(DISPATCH["doctor"]([], workspace))
     if args.command == "refresh":
         sync_argv = ["sync.py", "--prune"]
         if args.dry_run:
