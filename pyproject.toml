@@ -7,7 +7,7 @@ name = "llm-wiki-starter"
 dynamic = ["version"]
 description = "A local markdown-based LLM wiki starter with sync, ingest, query, and lint workflows."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
   { name = "Martez Mott" }
@@ -30,7 +30,11 @@ dev = [
 llm-wiki = "scripts.cli:main"
 
 [tool.setuptools]
-packages = ["scripts"]
+packages = ["scripts", "scripts.templates", "scripts.templates.schemas"]
+
+[tool.setuptools.package-data]
+"scripts.templates" = ["*.json", "env.example", "wikiignore"]
+"scripts.templates.schemas" = ["AGENTS.md"]
 
 [tool.setuptools.dynamic]
 version = {file = ["VERSION"]}

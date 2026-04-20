@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "name": "my-project",
+      "root": "/absolute/path/to/your/project",
+      "include": [
+        "README.md",
+        "docs/**/*.md"
+      ],
+      "exclude": [
+        "**/.DS_Store",
+        "**/*review*.md",
+        "**/*checklist*.md",
+        "**/*claude_prompt*.md"
+      ],
+      "naming": {
+        "mode": "preserve_path",
+        "prefix": "my-project"
+      }
+    }
+  ]
+}
