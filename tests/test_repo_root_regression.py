@@ -103,7 +103,7 @@ def test_lint_repo_root_no_banner():
     )
 
 
-def test_query_repo_root_no_banner_in_process(monkeypatch, capsys):
+def test_query_repo_root_no_banner_in_process(monkeypatch, tmp_path, capsys):
     """In-process ``query`` regression. NOT skipped.
 
     ``scripts.query`` imports ``call_claude`` as ``from scripts.claude_api
@@ -112,6 +112,17 @@ def test_query_repo_root_no_banner_in_process(monkeypatch, capsys):
     would not affect the already-bound name inside ``scripts.query``. We
     patch BOTH module paths so the mock is effective whichever binding the
     dispatch touches.
+
+    The ``scripts.workspace.repo_root`` resolver is redirected to a
+    ``tmp_path`` so the in-process run does NOT depend on the real
+    repo having a populated ``wiki/`` tree. Without this, a clean
+    checkout (no prior ingest run) would short-circuit
+    ``scripts.query.main`` at the "No wiki pages found" guard before
+    the mocked ``call_claude`` is ever reached -- silently masking
+    the regression this test is meant to catch. A single minimal
+    summaries page is seeded so ``collect_wiki_text`` returns a
+    non-empty string. Writing anywhere under the real repo's
+    ``wiki/`` tree is expressly forbidden by AC#2.
 
     Assertions are ordered so the non-emptiness precondition runs first:
     ``rc == 0`` and ``'STUB ANSWER' in stdout`` establish that the command
@@ -139,6 +150,18 @@ def test_query_repo_root_no_banner_in_process(monkeypatch, capsys):
     # Dummy key so init_client() does not short-circuit with a
     # "Missing ANTHROPIC_API_KEY" error before our mock is reached.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+
+    # Redirect the repo-root default to a throwaway tmp_path and seed a
+    # single minimal summaries page so ``scripts.query.collect_wiki_text``
+    # returns non-empty content. This keeps the test hermetic (no reliance
+    # on a prior ``ingest`` run) and never touches the real repo's wiki/.
+    fake_repo = tmp_path
+    (fake_repo / "wiki" / "summaries").mkdir(parents=True)
+    (fake_repo / "wiki" / "summaries" / "test.md").write_text(
+        "# Test Summary\n\nPlaceholder content for the in-process query test.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.workspace.repo_root", lambda: fake_repo)
 
     rc = cli.main(["query", "what is this wiki about?"])
     captured = capsys.readouterr()
