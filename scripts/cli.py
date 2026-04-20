@@ -15,7 +15,7 @@ import os
 import sys
 from typing import Callable
 
-from scripts import doctor, ingest, init as init_module, lint, query, sync
+from scripts import doctor, ingest, init as init_module, lint, query, show_config, sync
 from scripts.version import read_version
 from scripts.workspace import (
     WorkspaceNotFoundError,
@@ -242,6 +242,9 @@ def _handle_refresh_fast(argv: list[str], workspace: WorkspacePaths) -> int:
 DISPATCH: dict[str, Callable[[list[str], WorkspacePaths], int]] = {
     "doctor": doctor.main,
     "ingest": ingest.main,
+    "lint": lint.main,
+    "query": query.main,
+    "show-config": show_config.main,
     "sync": sync.main,
 }
 DISPATCH["refresh"] = _handle_refresh
@@ -267,8 +270,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     query_parser = subparsers.add_parser("query", help="Ask a question against the local wiki.")
     query_parser.add_argument("query_args", nargs=argparse.REMAINDER)
-    subparsers.add_parser("lint", help="Lint the generated wiki.")
+    lint_parser = subparsers.add_parser("lint", help="Lint the generated wiki.")
+    lint_parser.add_argument("lint_args", nargs=argparse.REMAINDER)
     subparsers.add_parser("doctor", help="Validate local config, versioning, and demo artifact readiness.")
+    subparsers.add_parser("show-config", help="Print the resolved config paths for the active workspace.")
 
     refresh_parser = subparsers.add_parser("refresh", help="Run sync with prune and then ingest.")
     refresh_parser.add_argument("--dry-run", action="store_true", help="Dry run sync before ingesting.")
@@ -350,13 +355,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ingest":
         return DISPATCH["ingest"](list(args.ingest_args), workspace)
     if args.command == "query":
-        sys.argv = ["query.py", *args.query_args]
-        query.main()
-        return 0
+        return DISPATCH["query"](list(args.query_args), workspace)
     if args.command == "lint":
-        raise SystemExit(lint.main())
+        raise SystemExit(DISPATCH["lint"](list(args.lint_args), workspace))
     if args.command == "doctor":
         raise SystemExit(DISPATCH["doctor"]([], workspace))
+    if args.command == "show-config":
+        return DISPATCH["show-config"]([], workspace)
     if args.command == "refresh":
         refresh_argv: list[str] = []
         if args.dry_run:
