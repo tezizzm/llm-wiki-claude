@@ -350,3 +350,288 @@ def test_main_banner_plus_doctor_uses_flag_workspace(tmp_path, monkeypatch, caps
     assert first_line == f"Workspace: {workspace_root} (from --workspace)"
     # Blank line follows
     assert captured.out.split("\n", 2)[1] == ""
+
+
+# ---------------------------------------------------------------------------
+# refresh / refresh-fast DISPATCH wiring (LWC-szm3)
+#
+# These tests exercise the canonical ``scripts.cli`` module (not the
+# importlib-loaded ``cli_module`` fixture above) because they need to
+# monkeypatch the ``DISPATCH`` entries that ``_handle_refresh`` and
+# ``_handle_refresh_fast`` call into. ``scripts.cli.DISPATCH['sync']`` and
+# ``DISPATCH['ingest']`` hold module-level function references; patching the
+# underlying ``scripts.sync.main`` / ``scripts.ingest.main`` attributes would
+# not rewire the dispatch table. Patching the table entries directly keeps
+# the test hermetic.
+# ---------------------------------------------------------------------------
+
+
+from scripts import cli as _scripts_cli  # noqa: E402  (late import by design)
+
+
+def _make_refresh_stubs(sync_rc: int = 0, ingest_rc: int = 0):
+    """Build (sync_stub, ingest_stub, calls) recording every dispatch call.
+
+    ``calls`` is a list of ``(name, argv, workspace)`` tuples preserving order
+    so tests can assert both the argv each stage received AND that the same
+    ``WorkspacePaths`` instance was passed to both.
+    """
+
+    calls: list[tuple[str, list[str], object]] = []
+
+    def sync_stub(argv, workspace):
+        calls.append(("sync", list(argv), workspace))
+        return sync_rc
+
+    def ingest_stub(argv, workspace):
+        calls.append(("ingest", list(argv), workspace))
+        # Mirror the real ingest token-summary line so refresh/refresh-fast
+        # tests can assert it shows up as the last line of stdout.
+        print("Used 1 input / 1 output tokens this run.")
+        return ingest_rc
+
+    return sync_stub, ingest_stub, calls
+
+
+def _patch_dispatch(monkeypatch, sync_stub, ingest_stub):
+    """Patch DISPATCH entries in a scope-safe way."""
+    monkeypatch.setitem(_scripts_cli.DISPATCH, "sync", sync_stub)
+    monkeypatch.setitem(_scripts_cli.DISPATCH, "ingest", ingest_stub)
+
+
+def test_cli_refresh_banner_once(tmp_path, monkeypatch, capsys):
+    """``--workspace ... refresh`` prints the banner exactly once."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, _ = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["--workspace", str(workspace_root), "refresh"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    banner_line = f"Workspace: {workspace_root} (from --workspace)"
+    assert out.count(banner_line) == 1
+    # Banner is the very first line of output
+    assert out.splitlines()[0] == banner_line
+
+
+def test_cli_refresh_fast_banner_once(tmp_path, monkeypatch, capsys):
+    """``--workspace ... refresh-fast`` prints the banner exactly once."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, _ = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["--workspace", str(workspace_root), "refresh-fast"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    banner_line = f"Workspace: {workspace_root} (from --workspace)"
+    assert out.count(banner_line) == 1
+    assert out.splitlines()[0] == banner_line
+
+
+def test_cli_refresh_passes_same_workspace(tmp_path, monkeypatch):
+    """Both sync and ingest must receive the identical WorkspacePaths object.
+
+    The dispatcher resolves the workspace exactly once; the same instance is
+    threaded through both stages so no stage re-derives paths from ``__file__``
+    or an env var.
+    """
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, calls = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["--workspace", str(workspace_root), "refresh"])
+    assert rc == 0
+
+    assert [name for name, _argv, _ws in calls] == ["sync", "ingest"]
+    _, sync_argv, sync_ws = calls[0]
+    _, _ingest_argv, ingest_ws = calls[1]
+    # Same object identity -- not just equal paths.
+    assert sync_ws is ingest_ws
+    # Sync received --prune (refresh = prune + ingest).
+    assert sync_argv == ["--prune"]
+
+
+def test_cli_refresh_fast_passes_same_workspace(tmp_path, monkeypatch):
+    """Same invariant as above, but for ``refresh-fast`` (no --prune)."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, calls = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["--workspace", str(workspace_root), "refresh-fast"])
+    assert rc == 0
+
+    assert [name for name, _argv, _ws in calls] == ["sync", "ingest"]
+    _, sync_argv, sync_ws = calls[0]
+    _, _ingest_argv, ingest_ws = calls[1]
+    assert sync_ws is ingest_ws
+    # refresh-fast = sync (no prune) + ingest.
+    assert sync_argv == []
+
+
+def test_cli_refresh_sync_failure_skips_ingest(tmp_path, monkeypatch):
+    """If sync returns non-zero, ingest is NOT called and the rc propagates."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, calls = _make_refresh_stubs(sync_rc=7)
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["--workspace", str(workspace_root), "refresh"])
+    assert rc == 7
+    # Only sync should have been invoked.
+    assert [name for name, _argv, _ws in calls] == ["sync"]
+
+
+def test_cli_refresh_fast_sync_failure_skips_ingest(tmp_path, monkeypatch):
+    """refresh-fast: sync failure also skips ingest and propagates rc."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, calls = _make_refresh_stubs(sync_rc=3)
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["--workspace", str(workspace_root), "refresh-fast"])
+    assert rc == 3
+    assert [name for name, _argv, _ws in calls] == ["sync"]
+
+
+def test_cli_refresh_success_returns_0(tmp_path, monkeypatch):
+    """Both stages succeed -> cli.main returns 0."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, calls = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["--workspace", str(workspace_root), "refresh"])
+    assert rc == 0
+    assert [name for name, _argv, _ws in calls] == ["sync", "ingest"]
+
+
+def test_cli_refresh_fast_success_returns_0(tmp_path, monkeypatch):
+    """refresh-fast: both stages succeed -> cli.main returns 0."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, calls = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["--workspace", str(workspace_root), "refresh-fast"])
+    assert rc == 0
+    assert [name for name, _argv, _ws in calls] == ["sync", "ingest"]
+
+
+def test_cli_refresh_token_summary_at_end(tmp_path, monkeypatch, capsys):
+    """The token-summary line is the LAST line of refresh-fast stdout.
+
+    DESIGN §8.2: there is no refresh-level aggregation; the line comes from
+    ingest.main's _emit_run_summary and therefore must be the final stdout
+    line when refresh-fast completes successfully.
+    """
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, _ = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["--workspace", str(workspace_root), "refresh-fast"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line]
+    assert lines, "expected some output"
+    last = lines[-1]
+    assert last.startswith("Used "), last
+    assert last.endswith(" tokens this run."), last
+
+
+def test_cli_refresh_repo_root_default_no_banner(tmp_path, monkeypatch, capsys):
+    """Repo-root default (no --workspace, no env) prints no banner.
+
+    AC 5: ``make refresh`` / ``make refresh-fast`` from the repo root must
+    behave 0.2.0-identical (no banner). The token-summary line still prints
+    because ingest always emits it, but the banner remains suppressed since
+    the workspace source is 'default'.
+    """
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+
+    sync_stub, ingest_stub, calls = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["refresh"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Workspace:" not in out
+    assert [name for name, _argv, _ws in calls] == ["sync", "ingest"]
+
+
+def test_cli_refresh_fast_repo_root_default_no_banner(tmp_path, monkeypatch, capsys):
+    """Repo-root default for refresh-fast also suppresses the banner."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+
+    sync_stub, ingest_stub, calls = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(["refresh-fast"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Workspace:" not in out
+    assert [name for name, _argv, _ws in calls] == ["sync", "ingest"]
+
+
+def test_cli_refresh_dry_run_skips_ingest(tmp_path, monkeypatch):
+    """``refresh --dry-run`` runs sync in dry-run mode and skips ingest."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, calls = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(
+        ["--workspace", str(workspace_root), "refresh", "--dry-run"]
+    )
+    assert rc == 0
+    assert [name for name, _argv, _ws in calls] == ["sync"]
+    _, sync_argv, _ws = calls[0]
+    assert "--dry-run" in sync_argv
+    assert "--prune" in sync_argv
+
+
+def test_cli_refresh_reconcile_passes_flag_to_ingest(tmp_path, monkeypatch):
+    """``refresh --reconcile`` threads --reconcile through to ingest only."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+
+    sync_stub, ingest_stub, calls = _make_refresh_stubs()
+    _patch_dispatch(monkeypatch, sync_stub, ingest_stub)
+
+    rc = _scripts_cli.main(
+        ["--workspace", str(workspace_root), "refresh", "--reconcile"]
+    )
+    assert rc == 0
+    assert [name for name, _argv, _ws in calls] == ["sync", "ingest"]
+    _, sync_argv, _ = calls[0]
+    _, ingest_argv, _ = calls[1]
+    assert "--reconcile" not in sync_argv
+    assert ingest_argv == ["--reconcile"]
