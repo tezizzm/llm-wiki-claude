@@ -79,6 +79,11 @@ def _make_mock_client() -> MagicMock:
             block.text = response_json
             response = MagicMock()
             response.content = [block]
+            # LWC-n3um: scripts.claude_api.call_claude reads usage.input_tokens
+            # / usage.output_tokens as ints; the default MagicMock auto-attr
+            # would return a MagicMock and break JSON serialization of the
+            # claude_api_call event.
+            response.usage = MagicMock(input_tokens=0, output_tokens=0)
             return response
         else:
             # Query call
@@ -87,6 +92,7 @@ def _make_mock_client() -> MagicMock:
             block.text = "Based on the wiki content, here is the answer to your question.\n\nSources:\n- wiki/summaries/demo-product.md"
             response = MagicMock()
             response.content = [block]
+            response.usage = MagicMock(input_tokens=0, output_tokens=0)
             return response
 
     client.messages.create.side_effect = _create_response

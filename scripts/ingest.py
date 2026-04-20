@@ -24,10 +24,16 @@ from fnmatch import fnmatch
 from html.parser import HTMLParser
 
 from dotenv import load_dotenv
-import anthropic
 from pydantic import ValidationError
 from pypdf import PdfReader
 
+from scripts.claude_api import (
+    ClaudeCallResult,
+    _append_event as _append_jsonl_event,
+    _now_iso,
+    build_client,
+    call_claude,
+)
 from scripts.config_models import IngestSettingsConfig
 from scripts.workspace import (
     WorkspacePaths,
@@ -38,6 +44,18 @@ from scripts.workspace import (
 )
 
 INGEST_SCHEMA_VERSION = 1
+
+
+def _format_tokens(n: int) -> str:
+    """Format ``n`` for the end-of-run summary line.
+
+    - ``n >= 1000`` -> one-decimal K (e.g. ``'~12.3K'``, ``'~1.0K'``).
+    - ``n < 1000``  -> the bare integer as a string (e.g. ``'850'``, ``'0'``).
+    """
+
+    if n >= 1000:
+        return f"~{n / 1000:.1f}K"
+    return str(n)
 
 DEFAULT_INGEST_SETTINGS: Dict[str, Any] = {
     "schema_version": INGEST_SCHEMA_VERSION,
@@ -480,7 +498,15 @@ def extract_text(path: Path) -> str:
         return extract_docx_text(path)
     return f"[Unsupported file type for direct parsing: {path.name}]"
 
-def init_client() -> tuple[anthropic.Anthropic, str]:
+def init_client() -> tuple[Any, str]:
+    """Construct the Anthropic client plus resolve the ingest model name.
+
+    The client is typed as ``Any`` because ``scripts.ingest`` MUST NOT import
+    ``anthropic`` directly; SDK access goes through :mod:`scripts.claude_api`.
+    The concrete runtime type is ``anthropic.Anthropic`` via
+    :func:`scripts.claude_api.build_client`.
+    """
+
     load_dotenv()
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key or api_key == "your_anthropic_api_key_here":
@@ -488,7 +514,7 @@ def init_client() -> tuple[anthropic.Anthropic, str]:
             "Missing ANTHROPIC_API_KEY. Copy .env.example to .env and set a real Anthropic API key."
         )
     model = os.getenv("ANTHROPIC_INGEST_MODEL", "claude-haiku-4-5")
-    client = anthropic.Anthropic(api_key=api_key)
+    client = build_client(api_key)
     return client, model
 
 def get_schema_text(workspace: WorkspacePaths) -> str:
@@ -505,36 +531,48 @@ def get_schema_text(workspace: WorkspacePaths) -> str:
         return ""
     return path.read_text(encoding="utf-8")
 
-def extract_text_blocks(response) -> str:
-    parts = []
-    for block in response.content:
-        if getattr(block, "type", None) == "text":
-            parts.append(block.text)
-    return "".join(parts).strip()
+def call_claude_json(
+    client: Any,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    workspace: WorkspacePaths,
+    totals: Dict[str, int],
+    context: str,
+) -> Dict[str, Any]:
+    """Call Claude for a single source and parse a JSON object from the reply.
 
-def call_claude_json(client: anthropic.Anthropic, model: str, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-    response = client.messages.create(
+    Routes through :func:`scripts.claude_api.call_claude` (the sole SDK call
+    site in the project) so every request emits a ``claude_api_call`` event
+    and its token usage is accumulated into ``totals`` for the end-of-run
+    ``run_summary``.
+    """
+
+    result: ClaudeCallResult = call_claude(
+        client=client,
         model=model,
-        max_tokens=4000,
-        temperature=0,
         system=system_prompt,
-        messages=[
-            {
-                "role": "user",
-                "content": user_prompt,
-            }
-        ],
+        messages=[{"role": "user", "content": user_prompt}],
+        max_tokens=4000,
+        context=context,
+        workspace=workspace,
+        log_event=True,
     )
-    text = extract_text_blocks(response)
+    totals["input"] += result.input_tokens
+    totals["output"] += result.output_tokens
+    totals["calls"] += 1
+
+    text = result.text.strip()
 
     # Extract the outermost JSON object, tolerating any surrounding prose or fences
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         text = match.group(0)
     else:
-        text = re.sub(r"^```json\s*", "", text.strip())
-        text = re.sub(r"^```\s*", "", text.strip())
-        text = re.sub(r"\s*```$", "", text.strip())
+        text = re.sub(r"^```json\s*", "", text)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
 
     return json.loads(text)
 
@@ -850,11 +888,13 @@ def cleanup_source_artifacts(workspace: WorkspacePaths, source_name: str, record
 
 def ingest_file(
     workspace: WorkspacePaths,
-    client: anthropic.Anthropic,
+    client: Any,
     model: str,
     path: Path,
     settings: Dict[str, Any],
     previous_record: Optional[Dict[str, Any]] = None,
+    *,
+    totals: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     raw_text = extract_text(path)[: settings["max_source_chars"]]
     schema_text = get_schema_text(workspace)
@@ -895,7 +935,20 @@ Source text:
 {raw_text}
 """
 
-    data = call_claude_json(client, model, system_prompt, user_prompt)
+    # When callers do not supply a totals accumulator (e.g. direct unit tests of
+    # ingest_file), use a throwaway local so call_claude_json's unconditional
+    # update is safe.  The end-of-run run_summary path in main() always supplies
+    # a real accumulator.
+    local_totals = totals if totals is not None else {"input": 0, "output": 0, "calls": 0}
+    data = call_claude_json(
+        client,
+        model,
+        system_prompt,
+        user_prompt,
+        workspace=workspace,
+        totals=local_totals,
+        context=path.name,
+    )
 
     title = source_title or data.get("title") or path.stem
     summary = data.get("summary", "")
@@ -1046,13 +1099,54 @@ def analyze_candidates(workspace: WorkspacePaths, files: List[Path], manifest: D
         actions["to_ingest"].append(path)
     return actions
 
+def _emit_run_summary(
+    workspace: WorkspacePaths,
+    model: str,
+    totals: Dict[str, int],
+) -> None:
+    """Append the end-of-run ``run_summary`` event AND print the summary line.
+
+    Per ARCHITECTURE §10.4 and §10.5 the two side effects are paired: readers
+    treat the presence of a ``run_summary`` event in
+    ``state/ingest_events.jsonl`` as proof the run completed, and the stdout
+    summary line is the user-facing echo of the same counts.  Both are emitted
+    only on the success path (inside ``main()``'s try block, just before
+    ``return 0``); if any exception propagates out before this helper runs, the
+    run_summary event and summary line are both absent -- which is the
+    atomicity contract the story requires.
+    """
+
+    _append_jsonl_event(
+        workspace.ingest_events_path,
+        {
+            "event": "run_summary",
+            "ts": _now_iso(),
+            "workspace": str(workspace.root),
+            "model": model,
+            "total_input_tokens": totals["input"],
+            "total_output_tokens": totals["output"],
+            "api_call_count": totals["calls"],
+        },
+    )
+    print(
+        f"Used {_format_tokens(totals['input'])} input "
+        f"/ {_format_tokens(totals['output'])} output tokens this run."
+    )
+
+
 def main(argv: list[str], workspace: WorkspacePaths) -> int:
     """Ingest entry point -- workspace-aware dispatch signature.
 
     Matches the :data:`scripts.cli.DISPATCH` contract
     ``fn(argv, workspace) -> int``.  Returns ``0`` on a successful run
-    (including ``--dry-run`` and ``no input``); returns a non-zero exit code
-    on a configuration-level failure before any LLM work begins.
+    (including ``--dry-run``, ``no input``, and setup/configuration-level
+    failures that the CLI reports but does not want to propagate).  An
+    exception that escapes the outer ``try`` is re-raised (and therefore the
+    ``run_summary`` event / summary line are NOT emitted, per the atomicity
+    contract in ARCHITECTURE §10.4).
+
+    Atomicity invariant: the ``run_summary`` event appears in
+    ``workspace.ingest_events_path`` IF AND ONLY IF this function returns 0.
     """
 
     parser = argparse.ArgumentParser(
@@ -1065,162 +1159,193 @@ def main(argv: list[str], workspace: WorkspacePaths) -> int:
 
     ensure_workspace_writable(workspace)
 
-    compatibility_warnings: List[str] = []
-    settings_path: Optional[Path] = None
+    # Resolve the model id up-front so every success path (including the
+    # setup-error branches that return 0) can emit a run_summary with a real
+    # model field.  If ANTHROPIC_INGEST_MODEL is unset we fall back to the
+    # documented default.
+    ingest_model = os.getenv("ANTHROPIC_INGEST_MODEL", "claude-haiku-4-5")
+    totals: Dict[str, int] = {"input": 0, "output": 0, "calls": 0}
+
     try:
-        settings_path, _is_fallback = resolve_ingest_settings(workspace)
-        raw_settings = load_json_file(settings_path, {})
-        prepared_settings, compatibility_warnings = prepare_ingest_settings(raw_settings, settings_path)
-        merged_settings = merge_dicts(DEFAULT_INGEST_SETTINGS, prepared_settings)
-        settings = IngestSettingsConfig.model_validate(merged_settings).model_dump()
-        settings["low_signal_sources"]["opaque_task_regex_compiled"] = re.compile(
-            settings["low_signal_sources"]["opaque_task_regex"],
-            re.IGNORECASE,
-        )
-        ensure_dirs(workspace, include_wiki=not args.dry_run)
-        manifest = load_manifest(workspace)
-        ignore_patterns = load_ignore_patterns(workspace)
-        client = None
-        model = os.getenv("ANTHROPIC_INGEST_MODEL", "claude-haiku-4-5")
-        if not args.dry_run:
-            client, model = init_client()
-    except FileNotFoundError as exc:
-        print(f"Setup error: missing required file: {exc}")
-        return 0
-    except json.JSONDecodeError:
-        print(f"Configuration error: invalid JSON in {settings_path}")
-        return 0
-    except ValidationError as exc:
-        print(f"Configuration error in {settings_path}:")
-        for error in exc.errors():
-            field = ".".join(str(part) for part in error["loc"])
-            print(f"- {field}: {error['msg']}")
-        return 0
-    except RuntimeError as exc:
-        print(f"Configuration error: {exc}")
-        return 0
-
-    for warning in compatibility_warnings:
-        print(f"Compatibility warning: {warning}")
-
-    files = collect_raw_candidates(workspace, ignore_patterns)
-    current_rel_paths = {str(path.relative_to(workspace.root)) for path in files}
-    stale_manifest_entries = sorted(set(manifest.get("files", {}).keys()) - current_rel_paths)
-    actions = analyze_candidates(workspace, files, manifest, settings)
-    reconciled = False
-    cleaned_stale = {"summaries": 0, "topics": 0, "entities": 0, "manifest_entries": 0}
-
-    if args.reconcile:
-        print("Reconciling derived wiki artifacts from current raw sources.")
-        reset_derived_outputs(workspace)
-        manifest = load_manifest(workspace)
-        actions = analyze_candidates(workspace, files, manifest, settings)
-        reconciled = True
-    elif stale_manifest_entries and not args.dry_run:
-        for rel_path in stale_manifest_entries:
-            record = manifest["files"].get(rel_path, {})
-            source_name = Path(rel_path).name
-            removed = cleanup_source_artifacts(workspace, source_name, record)
-            for key, value in removed.items():
-                cleaned_stale[key] += value
-            manifest["files"].pop(rel_path, None)
-            cleaned_stale["manifest_entries"] += 1
-            append_event(
-                workspace,
-                "stale_source_cleaned",
-                source_file=source_name,
-                removed=removed,
+        compatibility_warnings: List[str] = []
+        settings_path: Optional[Path] = None
+        try:
+            settings_path, _is_fallback = resolve_ingest_settings(workspace)
+            raw_settings = load_json_file(settings_path, {})
+            prepared_settings, compatibility_warnings = prepare_ingest_settings(raw_settings, settings_path)
+            merged_settings = merge_dicts(DEFAULT_INGEST_SETTINGS, prepared_settings)
+            settings = IngestSettingsConfig.model_validate(merged_settings).model_dump()
+            settings["low_signal_sources"]["opaque_task_regex_compiled"] = re.compile(
+                settings["low_signal_sources"]["opaque_task_regex"],
+                re.IGNORECASE,
             )
-        save_manifest(workspace, manifest)
-        update_index(workspace)
+            ensure_dirs(workspace, include_wiki=not args.dry_run)
+            manifest = load_manifest(workspace)
+            ignore_patterns = load_ignore_patterns(workspace)
+            client = None
+            model = ingest_model
+            if not args.dry_run:
+                client, model = init_client()
+                ingest_model = model
+        except FileNotFoundError as exc:
+            print(f"Setup error: missing required file: {exc}")
+            _emit_run_summary(workspace, ingest_model, totals)
+            return 0
+        except json.JSONDecodeError:
+            print(f"Configuration error: invalid JSON in {settings_path}")
+            _emit_run_summary(workspace, ingest_model, totals)
+            return 0
+        except ValidationError as exc:
+            print(f"Configuration error in {settings_path}:")
+            for error in exc.errors():
+                field = ".".join(str(part) for part in error["loc"])
+                print(f"- {field}: {error['msg']}")
+            _emit_run_summary(workspace, ingest_model, totals)
+            return 0
+        except RuntimeError as exc:
+            print(f"Configuration error: {exc}")
+            _emit_run_summary(workspace, ingest_model, totals)
+            return 0
 
-    if not files:
-        print("No files found in raw/inbox/")
-        save_last_ingest_run(
-            workspace,
-            {
+        for warning in compatibility_warnings:
+            print(f"Compatibility warning: {warning}")
+
+        files = collect_raw_candidates(workspace, ignore_patterns)
+        current_rel_paths = {str(path.relative_to(workspace.root)) for path in files}
+        stale_manifest_entries = sorted(set(manifest.get("files", {}).keys()) - current_rel_paths)
+        actions = analyze_candidates(workspace, files, manifest, settings)
+        reconciled = False
+        cleaned_stale = {"summaries": 0, "topics": 0, "entities": 0, "manifest_entries": 0}
+
+        if args.reconcile:
+            print("Reconciling derived wiki artifacts from current raw sources.")
+            reset_derived_outputs(workspace)
+            manifest = load_manifest(workspace)
+            actions = analyze_candidates(workspace, files, manifest, settings)
+            reconciled = True
+        elif stale_manifest_entries and not args.dry_run:
+            for rel_path in stale_manifest_entries:
+                record = manifest["files"].get(rel_path, {})
+                source_name = Path(rel_path).name
+                removed = cleanup_source_artifacts(workspace, source_name, record)
+                for key, value in removed.items():
+                    cleaned_stale[key] += value
+                manifest["files"].pop(rel_path, None)
+                cleaned_stale["manifest_entries"] += 1
+                append_event(
+                    workspace,
+                    "stale_source_cleaned",
+                    source_file=source_name,
+                    removed=removed,
+                )
+            save_manifest(workspace, manifest)
+            update_index(workspace)
+
+        if not files:
+            print("No files found in raw/inbox/")
+            save_last_ingest_run(
+                workspace,
+                {
+                    "ran_at_utc": datetime.now(timezone.utc).isoformat() + "Z",
+                    "status": "no_input",
+                    "raw_candidates": 0,
+                    "processed": 0,
+                    "reconciled": reconciled,
+                    "cleaned_stale": cleaned_stale,
+                },
+            )
+            _emit_run_summary(workspace, ingest_model, totals)
+            return 0
+
+        if args.dry_run:
+            dry_run_report = {
                 "ran_at_utc": datetime.now(timezone.utc).isoformat() + "Z",
-                "status": "no_input",
-                "raw_candidates": 0,
-                "processed": 0,
-                "reconciled": reconciled,
-                "cleaned_stale": cleaned_stale,
-            },
-        )
-        return 0
+                "status": "dry_run",
+                "settings_path": str(settings_path),
+                "raw_candidates": len(files),
+                "stale_manifest_entries": stale_manifest_entries,
+                "would_reconcile": args.reconcile,
+                "would_cleanup_stale": stale_manifest_entries,
+                "would_process": [path.name for path in actions["to_ingest"]],
+                "skipped_low_signal": actions["skipped_low_signal"],
+                "skipped_unchanged": actions["skipped_unchanged"],
+                "skipped_duplicates": actions["skipped_duplicates"],
+            }
+            save_last_ingest_run(workspace, dry_run_report)
+            write_last_ingest_report(workspace, dry_run_report)
+            print("Run summary:")
+            print(json.dumps(dry_run_report, indent=2))
+            _emit_run_summary(workspace, ingest_model, totals)
+            return 0
 
-    if args.dry_run:
-        run_summary = {
+        processed = 0
+        processed_files = []
+        errors = []
+
+        for path in actions["to_ingest"]:
+            digest = sha256_file(path)
+            rel_path = str(path.relative_to(workspace.root))
+            old_record = manifest["files"].get(rel_path, {})
+            print(f"Ingesting with model {model}: {path.name}")
+            append_event(workspace, "ingest_file_started", source_file=path.name, model=model)
+            try:
+                ingest_result = ingest_file(
+                    workspace,
+                    client,
+                    model,
+                    path,
+                    settings,
+                    previous_record=old_record,
+                    totals=totals,
+                )
+            except Exception as e:
+                error_message = f"{path.name}: {e}"
+                print(f"ERROR ingesting {error_message}")
+                append_log(workspace, f"ERROR ingesting `{path.name}`: {e}")
+                append_event(workspace, "ingest_file_failed", source_file=path.name, error=str(e))
+                errors.append(error_message)
+                continue
+            manifest["files"][rel_path] = {
+                "sha256": digest,
+                "last_ingested_utc": datetime.now(timezone.utc).isoformat() + "Z",
+                "model": model,
+                **ingest_result,
+            }
+            save_manifest(workspace, manifest)
+            processed += 1
+            processed_files.append(path.name)
+
+        merge_cleanup = refine_merged_pages(workspace, settings)
+        update_index(workspace)
+        page_stats = collect_page_stats(workspace)
+        run_report = {
             "ran_at_utc": datetime.now(timezone.utc).isoformat() + "Z",
-            "status": "dry_run",
+            "status": "completed_with_errors" if errors else "completed",
+            "model": model,
             "settings_path": str(settings_path),
             "raw_candidates": len(files),
+            "reconciled": reconciled,
+            "cleaned_stale": cleaned_stale,
+            "merge_cleanup": merge_cleanup,
             "stale_manifest_entries": stale_manifest_entries,
-            "would_reconcile": args.reconcile,
-            "would_cleanup_stale": stale_manifest_entries,
-            "would_process": [path.name for path in actions["to_ingest"]],
-            "skipped_low_signal": actions["skipped_low_signal"],
-            "skipped_unchanged": actions["skipped_unchanged"],
-            "skipped_duplicates": actions["skipped_duplicates"],
+            "processed": processed,
+            "processed_files": processed_files,
+            "skipped_low_signal": len(actions["skipped_low_signal"]),
+            "skipped_unchanged": len(actions["skipped_unchanged"]),
+            "skipped_duplicates": len(actions["skipped_duplicates"]),
+            "page_stats": page_stats,
+            "errors": errors,
         }
-        save_last_ingest_run(workspace, run_summary)
-        write_last_ingest_report(workspace, run_summary)
+        save_last_ingest_run(workspace, run_report)
+        write_last_ingest_report(workspace, run_report)
         print("Run summary:")
-        print(json.dumps(run_summary, indent=2))
+        print(json.dumps(run_report, indent=2))
+        # run_summary event + summary line must be the LAST things to happen
+        # inside this try block.  On any exception before this point, the
+        # event is not written and the summary line is not printed.
+        _emit_run_summary(workspace, model, totals)
         return 0
-
-    processed = 0
-    processed_files = []
-    errors = []
-
-    for path in actions["to_ingest"]:
-        digest = sha256_file(path)
-        rel_path = str(path.relative_to(workspace.root))
-        old_record = manifest["files"].get(rel_path, {})
-        print(f"Ingesting with model {model}: {path.name}")
-        append_event(workspace, "ingest_file_started", source_file=path.name, model=model)
-        try:
-            ingest_result = ingest_file(workspace, client, model, path, settings, previous_record=old_record)
-        except Exception as e:
-            error_message = f"{path.name}: {e}"
-            print(f"ERROR ingesting {error_message}")
-            append_log(workspace, f"ERROR ingesting `{path.name}`: {e}")
-            append_event(workspace, "ingest_file_failed", source_file=path.name, error=str(e))
-            errors.append(error_message)
-            continue
-        manifest["files"][rel_path] = {
-            "sha256": digest,
-            "last_ingested_utc": datetime.now(timezone.utc).isoformat() + "Z",
-            "model": model,
-            **ingest_result,
-        }
-        save_manifest(workspace, manifest)
-        processed += 1
-        processed_files.append(path.name)
-
-    merge_cleanup = refine_merged_pages(workspace, settings)
-    update_index(workspace)
-    page_stats = collect_page_stats(workspace)
-    run_summary = {
-        "ran_at_utc": datetime.now(timezone.utc).isoformat() + "Z",
-        "status": "completed_with_errors" if errors else "completed",
-        "model": model,
-        "settings_path": str(settings_path),
-        "raw_candidates": len(files),
-        "reconciled": reconciled,
-        "cleaned_stale": cleaned_stale,
-        "merge_cleanup": merge_cleanup,
-        "stale_manifest_entries": stale_manifest_entries,
-        "processed": processed,
-        "processed_files": processed_files,
-        "skipped_low_signal": len(actions["skipped_low_signal"]),
-        "skipped_unchanged": len(actions["skipped_unchanged"]),
-        "skipped_duplicates": len(actions["skipped_duplicates"]),
-        "page_stats": page_stats,
-        "errors": errors,
-    }
-    save_last_ingest_run(workspace, run_summary)
-    write_last_ingest_report(workspace, run_summary)
-    print("Run summary:")
-    print(json.dumps(run_summary, indent=2))
-    return 0
+    except Exception:
+        # Re-raise so the caller sees the failure AND so run_summary stays
+        # absent from ingest_events.jsonl (atomicity invariant).
+        raise

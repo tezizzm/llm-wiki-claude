@@ -130,3 +130,14 @@ def _now_iso() -> str:
     """Return the current UTC time as an ISO 8601 string with timezone suffix."""
 
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def build_client(api_key: str) -> Anthropic:
+    """Construct an ``Anthropic`` client for the given API key.
+
+    Centralizing construction here keeps every ``scripts.*`` module out of the
+    direct ``anthropic`` import graph -- callers depend on ``scripts.claude_api``
+    alone, and this module is the single place the SDK is referenced.
+    """
+
+    return Anthropic(api_key=api_key)
