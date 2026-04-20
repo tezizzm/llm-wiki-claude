@@ -348,21 +348,33 @@ def main(argv: list[str] | None = None) -> int:
     load_env(workspace)
 
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    # REMAINDER-using subparsers (sync / ingest / query / lint) expose a
+    # known Python argparse quirk: when the first token after the subcommand
+    # is an option flag (e.g. ``sync --dry-run``), REMAINDER does not swallow
+    # it because argparse tries to match it against the top-level parser.
+    # ``parse_known_args`` lets us recover those tokens and hand them to the
+    # subcommand's own ``main()`` for proper parsing.
+    args, unknown = parser.parse_known_args(argv)
 
     if args.command == "sync":
-        return DISPATCH["sync"](list(args.sync_args), workspace)
+        return DISPATCH["sync"](list(args.sync_args) + list(unknown), workspace)
     if args.command == "ingest":
-        return DISPATCH["ingest"](list(args.ingest_args), workspace)
+        return DISPATCH["ingest"](list(args.ingest_args) + list(unknown), workspace)
     if args.command == "query":
-        return DISPATCH["query"](list(args.query_args), workspace)
+        return DISPATCH["query"](list(args.query_args) + list(unknown), workspace)
     if args.command == "lint":
-        raise SystemExit(DISPATCH["lint"](list(args.lint_args), workspace))
+        raise SystemExit(DISPATCH["lint"](list(args.lint_args) + list(unknown), workspace))
     if args.command == "doctor":
+        if unknown:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
         raise SystemExit(DISPATCH["doctor"]([], workspace))
     if args.command == "show-config":
+        if unknown:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
         return DISPATCH["show-config"]([], workspace)
     if args.command == "refresh":
+        if unknown:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
         refresh_argv: list[str] = []
         if args.dry_run:
             refresh_argv.append("--dry-run")
@@ -370,6 +382,8 @@ def main(argv: list[str] | None = None) -> int:
             refresh_argv.append("--reconcile")
         return DISPATCH["refresh"](refresh_argv, workspace)
     if args.command == "refresh-fast":
+        if unknown:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
         refresh_fast_argv: list[str] = []
         if args.dry_run:
             refresh_fast_argv.append("--dry-run")
