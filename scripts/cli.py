@@ -160,11 +160,92 @@ def _print_verbose_resolution_block(workspace: WorkspacePaths) -> None:
 # Subcommands are migrated into this registry story by story; the legacy
 # ``sys.argv`` dispatch below continues to service anything not yet wired.
 
+def _handle_refresh(argv: list[str], workspace: WorkspacePaths) -> int:
+    """Run ``sync --prune`` then ``ingest`` against the given workspace.
+
+    Contract (DESIGN §4.1, §8.2):
+
+    * The workspace is resolved exactly once by ``cli.main`` and passed in --
+      this handler does NOT re-resolve or rebuild a ``WorkspacePaths``.
+    * Sync runs first with ``--prune`` (preserving 0.2.0 behavior where
+      ``make refresh`` = ``sync --prune && ingest``). ``--dry-run`` and
+      ``--reconcile`` are threaded through to the appropriate stage.
+    * If sync returns a non-zero exit code, ingest is NOT run and sync's
+      exit code propagates up so the CLI surfaces the failure.
+    * On ``--dry-run``, sync runs in dry-run mode and ingest is skipped
+      entirely (there is nothing to ingest when sync did not write).
+    * The banner is NOT printed here; ``cli.main`` prints it exactly once
+      per invocation before dispatch. The token-summary line is emitted by
+      ``ingest.main`` and is therefore the last line of stdout on success.
+    """
+
+    parser = argparse.ArgumentParser(
+        prog="refresh",
+        description="Run sync with prune and then ingest.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry run sync before ingesting (ingest is skipped).",
+    )
+    parser.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="Rebuild derived wiki artifacts before ingest.",
+    )
+    args = parser.parse_args(argv)
+
+    sync_argv: list[str] = ["--prune"]
+    if args.dry_run:
+        sync_argv.append("--dry-run")
+    rc = DISPATCH["sync"](sync_argv, workspace)
+    if rc != 0:
+        return rc
+    if args.dry_run:
+        return 0
+    ingest_argv: list[str] = []
+    if args.reconcile:
+        ingest_argv.append("--reconcile")
+    return DISPATCH["ingest"](ingest_argv, workspace)
+
+
+def _handle_refresh_fast(argv: list[str], workspace: WorkspacePaths) -> int:
+    """Run ``sync`` (no prune) then ``ingest`` against the given workspace.
+
+    Same contract as :func:`_handle_refresh` except sync is invoked without
+    ``--prune`` (0.2.0 semantics: ``make refresh-fast`` = incremental sync,
+    skipping the orphan-removal pass).
+    """
+
+    parser = argparse.ArgumentParser(
+        prog="refresh-fast",
+        description="Run sync without prune and then ingest.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry run sync before ingesting (ingest is skipped).",
+    )
+    args = parser.parse_args(argv)
+
+    sync_argv: list[str] = []
+    if args.dry_run:
+        sync_argv.append("--dry-run")
+    rc = DISPATCH["sync"](sync_argv, workspace)
+    if rc != 0:
+        return rc
+    if args.dry_run:
+        return 0
+    return DISPATCH["ingest"]([], workspace)
+
+
 DISPATCH: dict[str, Callable[[list[str], WorkspacePaths], int]] = {
     "doctor": doctor.main,
     "ingest": ingest.main,
     "sync": sync.main,
 }
+DISPATCH["refresh"] = _handle_refresh
+DISPATCH["refresh-fast"] = _handle_refresh_fast
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -277,24 +358,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         raise SystemExit(DISPATCH["doctor"]([], workspace))
     if args.command == "refresh":
-        sync_argv: list[str] = ["--prune"]
+        refresh_argv: list[str] = []
         if args.dry_run:
-            sync_argv.append("--dry-run")
-        DISPATCH["sync"](sync_argv, workspace)
-        if not args.dry_run:
-            ingest_argv: list[str] = []
-            if args.reconcile:
-                ingest_argv.append("--reconcile")
-            DISPATCH["ingest"](ingest_argv, workspace)
-        return 0
+            refresh_argv.append("--dry-run")
+        if args.reconcile:
+            refresh_argv.append("--reconcile")
+        return DISPATCH["refresh"](refresh_argv, workspace)
     if args.command == "refresh-fast":
-        sync_argv = []
+        refresh_fast_argv: list[str] = []
         if args.dry_run:
-            sync_argv.append("--dry-run")
-        DISPATCH["sync"](sync_argv, workspace)
-        if not args.dry_run:
-            DISPATCH["ingest"]([], workspace)
-        return 0
+            refresh_fast_argv.append("--dry-run")
+        return DISPATCH["refresh-fast"](refresh_fast_argv, workspace)
 
     parser.print_help()
     return 0
