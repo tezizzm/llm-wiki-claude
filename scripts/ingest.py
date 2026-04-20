@@ -1,3 +1,16 @@
+"""Ingest pipeline: build wiki artifacts from files in ``raw/inbox``.
+
+Every helper that needs a filesystem location receives a :class:`WorkspacePaths`
+instance; no module-level path constants remain.  ``INGEST_SCHEMA_VERSION``
+stays because it is a schema-version literal, not a path.
+
+See ARCHITECTURE.md §5.3 / §6 for the contract; the per-helper signature
+changes here are a direct translation of that section.  The ``main`` signature
+``main(argv: list[str], workspace: WorkspacePaths) -> int`` matches the
+workspace-aware dispatch contract used by every subcommand under
+``DISPATCH`` in ``scripts.cli``.
+"""
+
 import argparse
 import os
 import re
@@ -16,24 +29,14 @@ from pydantic import ValidationError
 from pypdf import PdfReader
 
 from scripts.config_models import IngestSettingsConfig
+from scripts.workspace import (
+    WorkspacePaths,
+    ensure_workspace_writable,
+    resolve_ingest_settings,
+    resolve_schema,
+    resolve_wikiignore,
+)
 
-ROOT = Path(__file__).resolve().parents[1]
-RAW_DIR = ROOT / "raw" / "inbox"
-WIKI_DIR = ROOT / "wiki"
-SUMMARIES_DIR = WIKI_DIR / "summaries"
-TOPICS_DIR = WIKI_DIR / "topics"
-ENTITIES_DIR = WIKI_DIR / "entities"
-STATE_DIR = ROOT / "state"
-MANIFEST_PATH = STATE_DIR / "manifest.json"
-INDEX_PATH = ROOT / "index.md"
-LOG_PATH = ROOT / "log.md"
-SCHEMA_PATH = ROOT / "schemas" / "AGENTS.md"
-WIKIIGNORE_PATH = ROOT / ".wikiignore"
-INGEST_SETTINGS_PATH = ROOT / "ingest-settings.local.json"
-INGEST_FALLBACK_SETTINGS_PATH = ROOT / "ingest-settings.json"
-LAST_INGEST_RUN_PATH = STATE_DIR / "last_ingest_run.json"
-INGEST_EVENTS_PATH = STATE_DIR / "ingest_events.jsonl"
-INGEST_REPORT_PATH = STATE_DIR / "last_ingest_report.md"
 INGEST_SCHEMA_VERSION = 1
 
 DEFAULT_INGEST_SETTINGS: Dict[str, Any] = {
@@ -147,11 +150,6 @@ def sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-def resolve_ingest_settings_path() -> Path:
-    if INGEST_SETTINGS_PATH.exists():
-        return INGEST_SETTINGS_PATH
-    return INGEST_FALLBACK_SETTINGS_PATH
-
 def merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():
@@ -191,8 +189,15 @@ def prepare_ingest_settings(raw_config: Dict[str, Any], settings_path: Path) -> 
         )
     return payload, warnings
 
-def load_ingest_settings() -> Dict[str, Any]:
-    path = resolve_ingest_settings_path()
+def load_ingest_settings(workspace: WorkspacePaths) -> Dict[str, Any]:
+    """Load ingest settings from ``workspace``, merging with defaults.
+
+    Uses ``resolve_ingest_settings`` so the workspace-local copy wins over the
+    repo-root fallback.  Returns a fully-validated settings dict with the
+    low-signal regex pre-compiled under ``opaque_task_regex_compiled``.
+    """
+
+    path, _is_fallback = resolve_ingest_settings(workspace)
     data = load_json_file(path, {})
     prepared, _warnings = prepare_ingest_settings(data, path)
     merged = merge_dicts(DEFAULT_INGEST_SETTINGS, prepared)
@@ -297,38 +302,48 @@ def select_terms(values: List[str], max_items: int, reject_fn, settings: Dict[st
     selected = [value for value in cleaned if not reject_fn(value, settings)]
     return selected[:max_items]
 
-def load_manifest() -> Dict[str, Any]:
-    if MANIFEST_PATH.exists():
-        return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+def load_manifest(workspace: WorkspacePaths) -> Dict[str, Any]:
+    if workspace.manifest_path.exists():
+        return json.loads(workspace.manifest_path.read_text(encoding="utf-8"))
     return {"files": {}}
 
-def save_manifest(manifest: Dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+def save_manifest(workspace: WorkspacePaths, manifest: Dict[str, Any]) -> None:
+    workspace.state_dir.mkdir(parents=True, exist_ok=True)
+    workspace.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
-def ensure_dirs(include_wiki: bool = True) -> None:
-    dirs = [RAW_DIR, STATE_DIR]
+def ensure_dirs(workspace: WorkspacePaths, include_wiki: bool = True) -> None:
+    dirs = [workspace.raw_dir, workspace.state_dir]
     if include_wiki:
-        dirs.extend([SUMMARIES_DIR, TOPICS_DIR, ENTITIES_DIR])
+        dirs.extend([workspace.summaries_dir, workspace.topics_dir, workspace.entities_dir])
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
     if include_wiki:
-        if not INDEX_PATH.exists():
-            INDEX_PATH.write_text("# Wiki Index\n\n", encoding="utf-8")
-        if not LOG_PATH.exists():
-            LOG_PATH.write_text("# Ingestion Log\n\n", encoding="utf-8")
+        if not workspace.index_path.exists():
+            workspace.index_path.write_text("# Wiki Index\n\n", encoding="utf-8")
+        if not workspace.log_path.exists():
+            workspace.log_path.write_text("# Ingestion Log\n\n", encoding="utf-8")
 
-def reset_derived_outputs() -> None:
-    for path in [SUMMARIES_DIR, TOPICS_DIR, ENTITIES_DIR]:
+def reset_derived_outputs(workspace: WorkspacePaths) -> None:
+    for path in [workspace.summaries_dir, workspace.topics_dir, workspace.entities_dir]:
         if path.exists():
             shutil.rmtree(path)
-    for file_path in [INDEX_PATH, LOG_PATH, MANIFEST_PATH]:
+    for file_path in [workspace.index_path, workspace.log_path, workspace.manifest_path]:
         if file_path.exists():
             file_path.unlink()
-    ensure_dirs()
+    ensure_dirs(workspace)
 
-def load_ignore_patterns() -> List[str]:
-    if not WIKIIGNORE_PATH.exists():
+def load_ignore_patterns(workspace: WorkspacePaths) -> List[str]:
+    """Return the wiki ignore patterns, honoring workspace + repo-root fallback.
+
+    Uses ``resolve_wikiignore`` so the workspace-local ``.wikiignore`` wins and
+    falls back to the repo-root template when missing.  When neither file
+    exists, a defensive built-in list is returned so dotfiles and OS cruft are
+    still filtered.
+    """
+
+    try:
+        path, _is_fallback = resolve_wikiignore(workspace)
+    except FileNotFoundError:
         return [
             ".DS_Store",
             "._*",
@@ -339,19 +354,19 @@ def load_ignore_patterns() -> List[str]:
             "Thumbs.db",
         ]
 
-    patterns = []
-    for line in WIKIIGNORE_PATH.read_text(encoding="utf-8").splitlines():
+    patterns: List[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
             patterns.append(line)
     return patterns
 
-def should_ignore_file(path: Path, ignore_patterns: List[str]) -> bool:
+def should_ignore_file(workspace: WorkspacePaths, path: Path, ignore_patterns: List[str]) -> bool:
     if not path.is_file():
         return True
 
     name = path.name
-    rel_path = path.relative_to(ROOT).as_posix()
+    rel_path = path.relative_to(workspace.root).as_posix()
 
     for pattern in ignore_patterns:
         if fnmatch(name, pattern) or fnmatch(rel_path, pattern):
@@ -476,10 +491,19 @@ def init_client() -> tuple[anthropic.Anthropic, str]:
     client = anthropic.Anthropic(api_key=api_key)
     return client, model
 
-def get_schema_text() -> str:
-    if SCHEMA_PATH.exists():
-        return SCHEMA_PATH.read_text(encoding="utf-8")
-    return ""
+def get_schema_text(workspace: WorkspacePaths) -> str:
+    """Read the schemas/AGENTS.md text, falling back through ``resolve_schema``.
+
+    Returns ``""`` when neither the workspace nor the repo-root copy exists;
+    downstream code tolerates an empty schema string (ingest will still call
+    the model, just without rule text in the system prompt).
+    """
+
+    try:
+        path, _is_fallback = resolve_schema(workspace)
+    except FileNotFoundError:
+        return ""
+    return path.read_text(encoding="utf-8")
 
 def extract_text_blocks(response) -> str:
     parts = []
@@ -518,19 +542,19 @@ def write_markdown(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
-def append_event(event_type: str, **fields: Any) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+def append_event(workspace: WorkspacePaths, event_type: str, **fields: Any) -> None:
+    workspace.state_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat() + "Z",
         "event": event_type,
         **fields,
     }
-    with INGEST_EVENTS_PATH.open("a", encoding="utf-8") as f:
+    with workspace.ingest_events_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload) + "\n")
 
-def append_log(message: str) -> None:
+def append_log(workspace: WorkspacePaths, message: str) -> None:
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-    with LOG_PATH.open("a", encoding="utf-8") as f:
+    with workspace.log_path.open("a", encoding="utf-8") as f:
         f.write(f"- {timestamp} {message}\n")
 
 def extract_heading(content: str) -> str:
@@ -585,18 +609,18 @@ def count_contributions(path: Path) -> int:
         return 0
     return len(parse_contribution_blocks(path.read_text(encoding="utf-8")))
 
-def collect_page_stats() -> Dict[str, Any]:
-    topic_files = sorted(TOPICS_DIR.glob("*.md"))
-    entity_files = sorted(ENTITIES_DIR.glob("*.md"))
+def collect_page_stats(workspace: WorkspacePaths) -> Dict[str, Any]:
+    topic_files = sorted(workspace.topics_dir.glob("*.md"))
+    entity_files = sorted(workspace.entities_dir.glob("*.md"))
     return {
-        "summaries": len(list(SUMMARIES_DIR.glob("*.md"))),
+        "summaries": len(list(workspace.summaries_dir.glob("*.md"))),
         "topics": len(topic_files),
         "entities": len(entity_files),
         "topic_contributions": sum(count_contributions(path) for path in topic_files),
         "entity_contributions": sum(count_contributions(path) for path in entity_files),
     }
 
-def refine_merged_pages(settings: Dict[str, Any]) -> Dict[str, int]:
+def refine_merged_pages(workspace: WorkspacePaths, settings: Dict[str, Any]) -> Dict[str, int]:
     actions = {
         "topic_alias_merges": 0,
         "entity_alias_merges": 0,
@@ -606,14 +630,14 @@ def refine_merged_pages(settings: Dict[str, Any]) -> Dict[str, int]:
         "entity_low_value_prunes": 0,
     }
     specs = [
-        ("topic", TOPICS_DIR, is_low_value_topic, "topic_alias_merges", "topic_normalizations", "topic_low_value_prunes"),
-        ("entity", ENTITIES_DIR, is_low_value_entity, "entity_alias_merges", "entity_normalizations", "entity_low_value_prunes"),
+        ("topic", workspace.topics_dir, is_low_value_topic, "topic_alias_merges", "topic_normalizations", "topic_low_value_prunes"),
+        ("entity", workspace.entities_dir, is_low_value_entity, "entity_alias_merges", "entity_normalizations", "entity_low_value_prunes"),
     ]
     for page_kind, directory, reject_fn, merge_key, normalize_key, prune_key in specs:
         for path in sorted(directory.glob("*.md")):
             if normalize_contribution_file(path):
                 actions[normalize_key] += 1
-                append_event("page_normalized", page_kind=page_kind, slug=path.stem)
+                append_event(workspace, "page_normalized", page_kind=page_kind, slug=path.stem)
 
         for path in sorted(directory.glob("*.md")):
             blocks = parse_contribution_blocks(path.read_text(encoding="utf-8"))
@@ -623,7 +647,7 @@ def refine_merged_pages(settings: Dict[str, Any]) -> Dict[str, int]:
             if reject_fn(title, settings):
                 path.unlink()
                 actions[prune_key] += 1
-                append_event("page_pruned_low_value", page_kind=page_kind, slug=path.stem, title=title)
+                append_event(workspace, "page_pruned_low_value", page_kind=page_kind, slug=path.stem, title=title)
                 continue
 
             canonical_slug = canonical_page_slug(path.stem)
@@ -636,6 +660,7 @@ def refine_merged_pages(settings: Dict[str, Any]) -> Dict[str, int]:
             path.unlink()
             actions[merge_key] += 1
             append_event(
+                workspace,
                 "page_alias_merged",
                 page_kind=page_kind,
                 from_slug=path.stem,
@@ -645,12 +670,12 @@ def refine_merged_pages(settings: Dict[str, Any]) -> Dict[str, int]:
             normalize_contribution_file(target_path)
     return actions
 
-def update_index() -> None:
+def update_index(workspace: WorkspacePaths) -> None:
     sections = ["# Wiki Index", ""]
     for label, folder in [
-        ("Summaries", SUMMARIES_DIR),
-        ("Topics", TOPICS_DIR),
-        ("Entities", ENTITIES_DIR),
+        ("Summaries", workspace.summaries_dir),
+        ("Topics", workspace.topics_dir),
+        ("Entities", workspace.entities_dir),
     ]:
         sections.append(f"## {label}")
         files = sorted(folder.glob("*.md"))
@@ -660,11 +685,11 @@ def update_index() -> None:
             sections.append("")
             continue
         for fp in files:
-            rel = fp.relative_to(ROOT).as_posix()
+            rel = fp.relative_to(workspace.root).as_posix()
             title = fp.stem.replace("-", " ").title()
             sections.append(f"- [{title}]({rel})")
         sections.append("")
-    INDEX_PATH.write_text("\n".join(sections), encoding="utf-8")
+    workspace.index_path.write_text("\n".join(sections), encoding="utf-8")
 
 def build_summary_markdown(
     title: str,
@@ -801,29 +826,30 @@ def remove_source_contribution(path: Path, source_file: str) -> bool:
         path.unlink()
     return True
 
-def cleanup_source_artifacts(source_name: str, record: Dict[str, Any]) -> Dict[str, int]:
+def cleanup_source_artifacts(workspace: WorkspacePaths, source_name: str, record: Dict[str, Any]) -> Dict[str, int]:
     removed = {"summaries": 0, "topics": 0, "entities": 0}
 
     summary_rel_path = record.get("summary_path")
     if summary_rel_path:
-        summary_path = ROOT / summary_rel_path
+        summary_path = workspace.root / summary_rel_path
     else:
-        summary_path = SUMMARIES_DIR / f"{slugify(Path(source_name).stem)}.md"
+        summary_path = workspace.summaries_dir / f"{slugify(Path(source_name).stem)}.md"
     if summary_path.exists():
         summary_path.unlink()
         removed["summaries"] += 1
 
     for slug in record.get("topic_slugs", []):
-        if remove_source_contribution(TOPICS_DIR / f"{slug}.md", source_name):
+        if remove_source_contribution(workspace.topics_dir / f"{slug}.md", source_name):
             removed["topics"] += 1
 
     for slug in record.get("entity_slugs", []):
-        if remove_source_contribution(ENTITIES_DIR / f"{slug}.md", source_name):
+        if remove_source_contribution(workspace.entities_dir / f"{slug}.md", source_name):
             removed["entities"] += 1
 
     return removed
 
 def ingest_file(
+    workspace: WorkspacePaths,
     client: anthropic.Anthropic,
     model: str,
     path: Path,
@@ -831,7 +857,7 @@ def ingest_file(
     previous_record: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     raw_text = extract_text(path)[: settings["max_source_chars"]]
-    schema_text = get_schema_text()
+    schema_text = get_schema_text(workspace)
     source_title = frontmatter_value(raw_text, "title")
     max_topics = settings["max_topics"]
     max_entities = settings["max_entities"]
@@ -890,7 +916,7 @@ Source text:
         if canonicalize_term(k) in entities
     }
 
-    summary_path = SUMMARIES_DIR / f"{slugify(path.stem)}.md"
+    summary_path = workspace.summaries_dir / f"{slugify(path.stem)}.md"
     summary_md = build_summary_markdown(
         title=title,
         source_file=path.name,
@@ -908,13 +934,13 @@ Source text:
     current_entity_slugs = {slugify(entity) for entity in entities}
 
     for stale_slug in sorted(previous_topic_slugs - current_topic_slugs):
-        remove_source_contribution(TOPICS_DIR / f"{stale_slug}.md", path.name)
+        remove_source_contribution(workspace.topics_dir / f"{stale_slug}.md", path.name)
 
     for stale_slug in sorted(previous_entity_slugs - current_entity_slugs):
-        remove_source_contribution(ENTITIES_DIR / f"{stale_slug}.md", path.name)
+        remove_source_contribution(workspace.entities_dir / f"{stale_slug}.md", path.name)
 
     for topic in topics:
-        topic_path = TOPICS_DIR / f"{slugify(topic)}.md"
+        topic_path = workspace.topics_dir / f"{slugify(topic)}.md"
         topic_md = build_topic_markdown(
             topic=topic,
             source_file=path.name,
@@ -925,7 +951,7 @@ Source text:
         upsert_source_contribution(topic_path, path.name, topic_md)
 
     for entity in entities:
-        entity_path = ENTITIES_DIR / f"{slugify(entity)}.md"
+        entity_path = workspace.entities_dir / f"{slugify(entity)}.md"
         entity_md = build_entity_markdown(
             entity=entity,
             source_file=path.name,
@@ -934,26 +960,27 @@ Source text:
         )
         upsert_source_contribution(entity_path, path.name, entity_md)
 
-    append_log(f'Ingested `{path.name}` -> summary `{summary_path.relative_to(ROOT).as_posix()}`')
+    append_log(workspace, f'Ingested `{path.name}` -> summary `{summary_path.relative_to(workspace.root).as_posix()}`')
     append_event(
+        workspace,
         "ingest_file_completed",
         source_file=path.name,
-        summary_path=summary_path.relative_to(ROOT).as_posix(),
+        summary_path=summary_path.relative_to(workspace.root).as_posix(),
         topics=sorted(current_topic_slugs),
         entities=sorted(current_entity_slugs),
     )
     return {
-        "summary_path": summary_path.relative_to(ROOT).as_posix(),
+        "summary_path": summary_path.relative_to(workspace.root).as_posix(),
         "topic_slugs": sorted(current_topic_slugs),
         "entity_slugs": sorted(current_entity_slugs),
     }
 
-def save_last_ingest_run(summary: Dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    LAST_INGEST_RUN_PATH.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+def save_last_ingest_run(workspace: WorkspacePaths, summary: Dict[str, Any]) -> None:
+    workspace.state_dir.mkdir(parents=True, exist_ok=True)
+    workspace.last_ingest_run_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
-def write_last_ingest_report(summary: Dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+def write_last_ingest_report(workspace: WorkspacePaths, summary: Dict[str, Any]) -> None:
+    workspace.state_dir.mkdir(parents=True, exist_ok=True)
     cleaned_stale = summary.get("cleaned_stale", {})
     merge_cleanup = summary.get("merge_cleanup", {})
     page_stats = summary.get("page_stats", {})
@@ -989,14 +1016,14 @@ def write_last_ingest_report(summary: Dict[str, Any]) -> None:
     processed_lines = [f"- `{name}`" for name in processed_files] or ["- None"]
     error_lines = [f"- `{name}`" for name in summary.get("errors", [])] or ["- None"]
     report += "\n" + "\n".join(processed_lines) + "\n\n## Errors\n" + "\n".join(error_lines) + "\n"
-    INGEST_REPORT_PATH.write_text(report, encoding="utf-8")
+    workspace.ingest_report_path.write_text(report, encoding="utf-8")
 
-def collect_raw_candidates(ignore_patterns: List[str]) -> List[Path]:
-    if not RAW_DIR.exists():
+def collect_raw_candidates(workspace: WorkspacePaths, ignore_patterns: List[str]) -> List[Path]:
+    if not workspace.raw_dir.exists():
         return []
-    return sorted([p for p in RAW_DIR.iterdir() if not should_ignore_file(p, ignore_patterns)])
+    return sorted([p for p in workspace.raw_dir.iterdir() if not should_ignore_file(workspace, p, ignore_patterns)])
 
-def analyze_candidates(files: List[Path], manifest: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
+def analyze_candidates(workspace: WorkspacePaths, files: List[Path], manifest: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
     actions = {
         "to_ingest": [],
         "skipped_low_signal": [],
@@ -1008,7 +1035,7 @@ def analyze_candidates(files: List[Path], manifest: Dict[str, Any], settings: Di
             actions["skipped_low_signal"].append(path.name)
             continue
         digest = sha256_file(path)
-        rel_path = str(path.relative_to(ROOT))
+        rel_path = str(path.relative_to(workspace.root))
         old = manifest["files"].get(rel_path)
         if old and old.get("sha256") == digest:
             actions["skipped_unchanged"].append(path.name)
@@ -1019,16 +1046,29 @@ def analyze_candidates(files: List[Path], manifest: Dict[str, Any], settings: Di
         actions["to_ingest"].append(path)
     return actions
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Build wiki artifacts from files in raw/inbox.")
+def main(argv: list[str], workspace: WorkspacePaths) -> int:
+    """Ingest entry point -- workspace-aware dispatch signature.
+
+    Matches the :data:`scripts.cli.DISPATCH` contract
+    ``fn(argv, workspace) -> int``.  Returns ``0`` on a successful run
+    (including ``--dry-run`` and ``no input``); returns a non-zero exit code
+    on a configuration-level failure before any LLM work begins.
+    """
+
+    parser = argparse.ArgumentParser(
+        prog="ingest",
+        description="Build wiki artifacts from files in raw/inbox.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Show what ingest would do without calling the model or writing files.")
     parser.add_argument("--reconcile", action="store_true", help="Reset derived wiki artifacts before ingesting current raw sources.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    settings_path = resolve_ingest_settings_path()
+    ensure_workspace_writable(workspace)
+
+    compatibility_warnings: List[str] = []
+    settings_path: Optional[Path] = None
     try:
-        if not settings_path.exists():
-            raise FileNotFoundError(settings_path)
+        settings_path, _is_fallback = resolve_ingest_settings(workspace)
         raw_settings = load_json_file(settings_path, {})
         prepared_settings, compatibility_warnings = prepare_ingest_settings(raw_settings, settings_path)
         merged_settings = merge_dicts(DEFAULT_INGEST_SETTINGS, prepared_settings)
@@ -1037,65 +1077,67 @@ def main() -> None:
             settings["low_signal_sources"]["opaque_task_regex"],
             re.IGNORECASE,
         )
-        ensure_dirs(include_wiki=not args.dry_run)
-        manifest = load_manifest()
-        ignore_patterns = load_ignore_patterns()
+        ensure_dirs(workspace, include_wiki=not args.dry_run)
+        manifest = load_manifest(workspace)
+        ignore_patterns = load_ignore_patterns(workspace)
         client = None
         model = os.getenv("ANTHROPIC_INGEST_MODEL", "claude-haiku-4-5")
         if not args.dry_run:
             client, model = init_client()
     except FileNotFoundError as exc:
         print(f"Setup error: missing required file: {exc}")
-        return
+        return 0
     except json.JSONDecodeError:
         print(f"Configuration error: invalid JSON in {settings_path}")
-        return
+        return 0
     except ValidationError as exc:
         print(f"Configuration error in {settings_path}:")
         for error in exc.errors():
             field = ".".join(str(part) for part in error["loc"])
             print(f"- {field}: {error['msg']}")
-        return
+        return 0
     except RuntimeError as exc:
         print(f"Configuration error: {exc}")
-        return
+        return 0
 
     for warning in compatibility_warnings:
         print(f"Compatibility warning: {warning}")
 
-    files = collect_raw_candidates(ignore_patterns)
-    current_rel_paths = {str(path.relative_to(ROOT)) for path in files}
+    files = collect_raw_candidates(workspace, ignore_patterns)
+    current_rel_paths = {str(path.relative_to(workspace.root)) for path in files}
     stale_manifest_entries = sorted(set(manifest.get("files", {}).keys()) - current_rel_paths)
-    actions = analyze_candidates(files, manifest, settings)
+    actions = analyze_candidates(workspace, files, manifest, settings)
     reconciled = False
     cleaned_stale = {"summaries": 0, "topics": 0, "entities": 0, "manifest_entries": 0}
 
     if args.reconcile:
         print("Reconciling derived wiki artifacts from current raw sources.")
-        reset_derived_outputs()
-        manifest = load_manifest()
-        actions = analyze_candidates(files, manifest, settings)
+        reset_derived_outputs(workspace)
+        manifest = load_manifest(workspace)
+        actions = analyze_candidates(workspace, files, manifest, settings)
         reconciled = True
     elif stale_manifest_entries and not args.dry_run:
         for rel_path in stale_manifest_entries:
             record = manifest["files"].get(rel_path, {})
             source_name = Path(rel_path).name
-            removed = cleanup_source_artifacts(source_name, record)
+            removed = cleanup_source_artifacts(workspace, source_name, record)
             for key, value in removed.items():
                 cleaned_stale[key] += value
             manifest["files"].pop(rel_path, None)
             cleaned_stale["manifest_entries"] += 1
             append_event(
+                workspace,
                 "stale_source_cleaned",
                 source_file=source_name,
                 removed=removed,
             )
-        save_manifest(manifest)
-        update_index()
+        save_manifest(workspace, manifest)
+        update_index(workspace)
 
     if not files:
         print("No files found in raw/inbox/")
         save_last_ingest_run(
+            workspace,
             {
                 "ran_at_utc": datetime.now(timezone.utc).isoformat() + "Z",
                 "status": "no_input",
@@ -1103,9 +1145,9 @@ def main() -> None:
                 "processed": 0,
                 "reconciled": reconciled,
                 "cleaned_stale": cleaned_stale,
-            }
+            },
         )
-        return
+        return 0
 
     if args.dry_run:
         run_summary = {
@@ -1121,11 +1163,11 @@ def main() -> None:
             "skipped_unchanged": actions["skipped_unchanged"],
             "skipped_duplicates": actions["skipped_duplicates"],
         }
-        save_last_ingest_run(run_summary)
-        write_last_ingest_report(run_summary)
+        save_last_ingest_run(workspace, run_summary)
+        write_last_ingest_report(workspace, run_summary)
         print("Run summary:")
         print(json.dumps(run_summary, indent=2))
-        return
+        return 0
 
     processed = 0
     processed_files = []
@@ -1133,17 +1175,17 @@ def main() -> None:
 
     for path in actions["to_ingest"]:
         digest = sha256_file(path)
-        rel_path = str(path.relative_to(ROOT))
+        rel_path = str(path.relative_to(workspace.root))
         old_record = manifest["files"].get(rel_path, {})
         print(f"Ingesting with model {model}: {path.name}")
-        append_event("ingest_file_started", source_file=path.name, model=model)
+        append_event(workspace, "ingest_file_started", source_file=path.name, model=model)
         try:
-            ingest_result = ingest_file(client, model, path, settings, previous_record=old_record)
+            ingest_result = ingest_file(workspace, client, model, path, settings, previous_record=old_record)
         except Exception as e:
             error_message = f"{path.name}: {e}"
             print(f"ERROR ingesting {error_message}")
-            append_log(f"ERROR ingesting `{path.name}`: {e}")
-            append_event("ingest_file_failed", source_file=path.name, error=str(e))
+            append_log(workspace, f"ERROR ingesting `{path.name}`: {e}")
+            append_event(workspace, "ingest_file_failed", source_file=path.name, error=str(e))
             errors.append(error_message)
             continue
         manifest["files"][rel_path] = {
@@ -1152,13 +1194,13 @@ def main() -> None:
             "model": model,
             **ingest_result,
         }
-        save_manifest(manifest)
+        save_manifest(workspace, manifest)
         processed += 1
         processed_files.append(path.name)
 
-    merge_cleanup = refine_merged_pages(settings)
-    update_index()
-    page_stats = collect_page_stats()
+    merge_cleanup = refine_merged_pages(workspace, settings)
+    update_index(workspace)
+    page_stats = collect_page_stats(workspace)
     run_summary = {
         "ran_at_utc": datetime.now(timezone.utc).isoformat() + "Z",
         "status": "completed_with_errors" if errors else "completed",
@@ -1177,10 +1219,8 @@ def main() -> None:
         "page_stats": page_stats,
         "errors": errors,
     }
-    save_last_ingest_run(run_summary)
-    write_last_ingest_report(run_summary)
+    save_last_ingest_run(workspace, run_summary)
+    write_last_ingest_report(workspace, run_summary)
     print("Run summary:")
     print(json.dumps(run_summary, indent=2))
-
-if __name__ == "__main__":
-    main()
+    return 0

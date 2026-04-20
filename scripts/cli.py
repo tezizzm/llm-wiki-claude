@@ -162,6 +162,7 @@ def _print_verbose_resolution_block(workspace: WorkspacePaths) -> None:
 
 DISPATCH: dict[str, Callable[[list[str], WorkspacePaths], int]] = {
     "doctor": doctor.main,
+    "ingest": ingest.main,
 }
 
 
@@ -267,9 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         sync.main()
         return 0
     if args.command == "ingest":
-        sys.argv = ["ingest.py", *args.ingest_args]
-        ingest.main()
-        return 0
+        return DISPATCH["ingest"](list(args.ingest_args), workspace)
     if args.command == "query":
         sys.argv = ["query.py", *args.query_args]
         query.main()
@@ -285,11 +284,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.argv = sync_argv
         sync.main()
         if not args.dry_run:
-            ingest_argv = ["ingest.py"]
+            ingest_argv: list[str] = []
             if args.reconcile:
                 ingest_argv.append("--reconcile")
-            sys.argv = ingest_argv
-            ingest.main()
+            DISPATCH["ingest"](ingest_argv, workspace)
         return 0
     if args.command == "refresh-fast":
         sync_argv = ["sync.py"]
@@ -298,8 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.argv = sync_argv
         sync.main()
         if not args.dry_run:
-            sys.argv = ["ingest.py"]
-            ingest.main()
+            DISPATCH["ingest"]([], workspace)
         return 0
 
     parser.print_help()
