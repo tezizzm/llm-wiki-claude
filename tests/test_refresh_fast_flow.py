@@ -26,34 +26,32 @@ def test_refresh_fast_smoke_flow(tmp_path, monkeypatch):
     schemas_dir.mkdir(parents=True)
     (schemas_dir / "AGENTS.md").write_text("Schema", encoding="utf-8")
     (root / ".wikiignore").write_text("", encoding="utf-8")
-    (root / "sync-sources.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "sources": [
-                    {
-                        "name": "demo",
-                        "root": str(source_root),
-                        "include": ["README.md"],
-                        "exclude": [],
-                        "naming": {"mode": "preserve_path", "prefix": "demo"},
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
+    sync_config_text = json.dumps(
+        {
+            "schema_version": 1,
+            "sources": [
+                {
+                    "name": "demo",
+                    "root": str(source_root),
+                    "include": ["README.md"],
+                    "exclude": [],
+                    "naming": {"mode": "preserve_path", "prefix": "demo"},
+                }
+            ],
+        }
     )
+    # Workspace-local primary copy (LWC-btzz: sync now resolves from workspace)
+    (root / "sync-sources.local.json").write_text(sync_config_text, encoding="utf-8")
+    # Also keep the plain name for any legacy reads in ingest/lint.
+    (root / "sync-sources.json").write_text(sync_config_text, encoding="utf-8")
     (root / "ingest-settings.json").write_text(
         Path("ingest-settings.json").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(sync, "ROOT", root)
-    monkeypatch.setattr(sync, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(sync, "STATE_DIR", state_dir)
-    monkeypatch.setattr(sync, "SYNC_CONFIG_PATH", root / "sync-sources.local.json")
-    monkeypatch.setattr(sync, "SYNC_FALLBACK_CONFIG_PATH", root / "sync-sources.json")
-    monkeypatch.setattr(sync, "SYNC_MANIFEST_PATH", state_dir / "sync_manifest.json")
+    # sync is now workspace-aware; route it by pointing LLM_WIKI_WORKSPACE at
+    # the tmp project so ``cli.main`` resolves the workspace to this dir.
+    monkeypatch.setenv("LLM_WIKI_WORKSPACE", str(root))
 
     # ingest no longer has module-level path constants (LWC-4z0t); it derives
     # paths from the WorkspacePaths passed via cli.DISPATCH.  We point cli at
