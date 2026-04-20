@@ -5,14 +5,18 @@ command-line entry point (sync, ingest, query, lint, doctor) consumes a
 ``WorkspacePaths`` instance instead of deriving its own ``ROOT`` / derived
 constants from ``__file__``.
 
-See ARCHITECTURE.md §3 for the full contract. This file intentionally stays
-small and pure: no I/O, no filesystem validation. Path existence and
-validation are the job of the resolver built in a later story.
+See ARCHITECTURE.md §3 for the full contract. Path construction itself stays
+pure: no I/O at dataclass construction time. Config resolvers and the
+``load_env`` helper live here because they are conceptually workspace-scoped
+and share the fallback rules documented in ARCHITECTURE §3.4.
 """
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from dotenv import dotenv_values
 
 WorkspaceSource = Literal["flag", "env", "default"]
 
@@ -190,3 +194,212 @@ def resolve_workspace_for_init(
 
     raw = Path(path_arg)
     return _resolve_against_cwd(raw, cwd)
+
+
+# ---------------------------------------------------------------------------
+# Config path resolvers (ARCHITECTURE §3.4)
+# ---------------------------------------------------------------------------
+#
+# Each resolver implements the same contract:
+#
+#   if workspace.<primary>.exists(): return (primary, False)
+#   elif workspace.<fallback>.exists(): return (fallback, True)
+#   else: raise FileNotFoundError naming both expected paths
+#
+# The boolean return value is ``is_fallback``: ``True`` when the workspace-local
+# copy is missing and we resolved to the repo-root default. Callers (doctor,
+# show_config, sync, ingest) use this to surface "using repo-root fallback"
+# messaging without reimplementing the precedence rules.
+
+
+def _resolve_with_fallback(
+    primary: Path,
+    fallback: Path,
+) -> tuple[Path, bool]:
+    """Shared primary -> fallback resolution helper.
+
+    Returns ``(primary, False)`` if ``primary`` exists, else ``(fallback, True)``
+    if ``fallback`` exists, else raises ``FileNotFoundError`` naming both paths.
+    """
+
+    if primary.exists():
+        return primary, False
+    if fallback.exists():
+        return fallback, True
+    raise FileNotFoundError(
+        f"Neither {primary} nor {fallback} exists"
+    )
+
+
+def resolve_sync_config(workspace: WorkspacePaths) -> tuple[Path, bool]:
+    """Resolve the sync-sources config path with repo-root fallback.
+
+    Returns ``(path, is_fallback)``. Raises ``FileNotFoundError`` if neither
+    ``workspace.sync_config_path`` nor ``workspace.sync_fallback_config_path``
+    exists on disk.
+    """
+
+    return _resolve_with_fallback(
+        workspace.sync_config_path,
+        workspace.sync_fallback_config_path,
+    )
+
+
+def resolve_ingest_settings(workspace: WorkspacePaths) -> tuple[Path, bool]:
+    """Resolve the ingest-settings config path with repo-root fallback.
+
+    Returns ``(path, is_fallback)``. Raises ``FileNotFoundError`` if neither
+    ``workspace.ingest_settings_path`` nor
+    ``workspace.ingest_fallback_settings_path`` exists on disk.
+    """
+
+    return _resolve_with_fallback(
+        workspace.ingest_settings_path,
+        workspace.ingest_fallback_settings_path,
+    )
+
+
+def resolve_schema(workspace: WorkspacePaths) -> tuple[Path, bool]:
+    """Resolve the schemas/AGENTS.md path with repo-root fallback.
+
+    Returns ``(path, is_fallback)``. Raises ``FileNotFoundError`` if neither
+    ``workspace.schema_path`` nor ``workspace.schema_fallback_path`` exists
+    on disk.
+    """
+
+    return _resolve_with_fallback(
+        workspace.schema_path,
+        workspace.schema_fallback_path,
+    )
+
+
+def resolve_wikiignore(workspace: WorkspacePaths) -> tuple[Path, bool]:
+    """Resolve the .wikiignore path with repo-root fallback.
+
+    Returns ``(path, is_fallback)``. Raises ``FileNotFoundError`` if neither
+    ``workspace.wikiignore_path`` nor ``workspace.wikiignore_fallback_path``
+    exists on disk.
+    """
+
+    return _resolve_with_fallback(
+        workspace.wikiignore_path,
+        workspace.wikiignore_fallback_path,
+    )
+
+
+def resolve_env(workspace: WorkspacePaths) -> tuple[Path | None, bool]:
+    """Resolve the .env path with repo-root fallback.
+
+    Unlike the other resolvers, ``.env`` is allowed to be absent in both
+    locations -- it is optional upstream of ``doctor``. Returns:
+
+    - ``(workspace.env_path, False)`` if the workspace copy exists
+    - ``(workspace.env_fallback_path, True)`` if only the repo-root copy exists
+    - ``(None, False)`` if neither exists
+    """
+
+    if workspace.env_path.exists():
+        return workspace.env_path, False
+    if workspace.env_fallback_path.exists():
+        return workspace.env_fallback_path, True
+    return None, False
+
+
+# ---------------------------------------------------------------------------
+# load_env (ARCHITECTURE §3.5, DESIGN §11)
+# ---------------------------------------------------------------------------
+
+
+def load_env(workspace: WorkspacePaths) -> dict[str, str]:
+    """Load .env with two-level fallback into ``os.environ``.
+
+    Precedence (lowest -> highest; later wins):
+
+    1. ``workspace.env_fallback_path`` (repo-root ``.env``) if it exists
+    2. ``workspace.env_path`` (workspace ``.env``) if it exists
+    3. Real ``os.environ`` -- ALWAYS wins over both .env files
+
+    Invariants (ARCHITECTURE §14, CRITICAL):
+
+    - Never overwrites a pre-existing ``os.environ`` key
+      (uses ``os.environ.setdefault``, never ``os.environ[k] = v``).
+    - Idempotent: calling twice produces the same ``os.environ`` state as once.
+    - Does not read ``LLM_WIKI_WORKSPACE``; the ``workspace`` parameter is
+      authoritative.
+
+    Returns the merged ``{key: value}`` dict sourced from the .env files (before
+    the ``os.environ.setdefault`` application), so callers can observe what the
+    .env files contained even when real environment values already shadowed
+    them.
+    """
+
+    merged: dict[str, str] = {}
+
+    fallback = workspace.env_fallback_path
+    if fallback.exists():
+        merged.update(
+            {k: v for k, v in dotenv_values(fallback).items() if v is not None}
+        )
+
+    primary = workspace.env_path
+    if primary.exists():
+        merged.update(
+            {k: v for k, v in dotenv_values(primary).items() if v is not None}
+        )
+
+    # Apply to os.environ using setdefault so real environment values always
+    # win. This is the critical contract from DESIGN §11: load_env never
+    # clobbers a value the user already exported.
+    for key, value in merged.items():
+        os.environ.setdefault(key, value)
+
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Workspace validation helpers
+# ---------------------------------------------------------------------------
+
+
+def ensure_workspace_exists(workspace: WorkspacePaths) -> None:
+    """Validate that ``workspace.root`` exists and is a directory.
+
+    - Raises ``WorkspaceNotFoundError`` if the root does not exist.
+    - Raises ``WorkspaceInvalidError`` if the root exists but is not a
+      directory.
+
+    Used by all commands except ``init`` (which creates the workspace) to fail
+    fast with a clear error message before any further filesystem work.
+    """
+
+    root = workspace.root
+    if not root.exists():
+        raise WorkspaceNotFoundError(root)
+    if not root.is_dir():
+        raise WorkspaceInvalidError(
+            f"workspace root exists but is not a directory: {root}"
+        )
+
+
+def ensure_workspace_writable(workspace: WorkspacePaths) -> None:
+    """Create writable workspace subdirectories if they are missing.
+
+    Idempotent: safe to call on every invocation. Creates:
+
+    - ``workspace.state_dir``
+    - ``workspace.raw_dir`` (``raw/inbox``; parents must also be created)
+    - ``workspace.summaries_dir``, ``workspace.topics_dir``,
+      ``workspace.entities_dir`` (all under ``wiki/``)
+
+    Called by ``sync`` and ``ingest`` before they write outputs. NOT called by
+    ``doctor`` because doctor is strictly read-only.
+    """
+
+    for directory in (
+        workspace.state_dir,
+        workspace.raw_dir,
+        workspace.summaries_dir,
+        workspace.topics_dir,
+        workspace.entities_dir,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
