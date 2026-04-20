@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts import cli, doctor, ingest, lint, query
+from scripts import cli, doctor, ingest, query
 import scripts.sync as sync_mod
 import scripts.ingest as ingest_mod
 
@@ -185,12 +185,13 @@ def _monkeypatch_roots(project: Path, monkeypatch) -> None:
     # set above routes cli.main(['sync']) to the tmp project without needing
     # to patch module-level path constants.
 
-    monkeypatch.setattr(lint, "ROOT", project)
-    monkeypatch.setattr(lint, "WIKI_DIR", project / "wiki")
+    # lint is workspace-aware (LWC-7yge); the LLM_WIKI_WORKSPACE env var set
+    # above routes cli.main(['lint']) to the tmp project without needing to
+    # patch module-level path constants.
 
-    monkeypatch.setattr(query, "ROOT", project)
-    monkeypatch.setattr(query, "WIKI_DIR", project / "wiki")
-    monkeypatch.setattr(query, "INDEX_PATH", project / "index.md")
+    # query is workspace-aware (LWC-zaz2); the LLM_WIKI_WORKSPACE env var set
+    # above routes cli.main(['query', ...]) to the tmp project without needing
+    # to patch module-level path constants.
 
     monkeypatch.chdir(project)
 
