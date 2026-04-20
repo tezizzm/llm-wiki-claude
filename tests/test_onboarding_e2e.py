@@ -189,9 +189,9 @@ def _monkeypatch_roots(project: Path, monkeypatch) -> None:
     # above routes cli.main(['lint']) to the tmp project without needing to
     # patch module-level path constants.
 
-    monkeypatch.setattr(query, "ROOT", project)
-    monkeypatch.setattr(query, "WIKI_DIR", project / "wiki")
-    monkeypatch.setattr(query, "INDEX_PATH", project / "index.md")
+    # query is workspace-aware (LWC-zaz2); the LLM_WIKI_WORKSPACE env var set
+    # above routes cli.main(['query', ...]) to the tmp project without needing
+    # to patch module-level path constants.
 
     monkeypatch.chdir(project)
 

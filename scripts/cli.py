@@ -243,6 +243,7 @@ DISPATCH: dict[str, Callable[[list[str], WorkspacePaths], int]] = {
     "doctor": doctor.main,
     "ingest": ingest.main,
     "lint": lint.main,
+    "query": query.main,
     "show-config": show_config.main,
     "sync": sync.main,
 }
@@ -354,9 +355,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ingest":
         return DISPATCH["ingest"](list(args.ingest_args), workspace)
     if args.command == "query":
-        sys.argv = ["query.py", *args.query_args]
-        query.main()
-        return 0
+        return DISPATCH["query"](list(args.query_args), workspace)
     if args.command == "lint":
         raise SystemExit(DISPATCH["lint"](list(args.lint_args), workspace))
     if args.command == "doctor":
