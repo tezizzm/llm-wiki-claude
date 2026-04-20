@@ -30,7 +30,11 @@ dev = [
 llm-wiki = "scripts.cli:main"
 
 [tool.setuptools]
-packages = ["scripts"]
+packages = ["scripts", "scripts.templates", "scripts.templates.schemas"]
+
+[tool.setuptools.package-data]
+"scripts.templates" = ["*.json", "env.example", "wikiignore"]
+"scripts.templates.schemas" = ["AGENTS.md"]
 
 [tool.setuptools.dynamic]
 version = {file = ["VERSION"]}

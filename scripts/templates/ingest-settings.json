@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "max_source_chars": 20000,
+  "max_topics": 6,
+  "max_entities": 6,
+  "low_signal_sources": {
+    "opaque_task_regex": "^AM-[a-z0-9]{4}\\.md$",
+    "name_patterns": [
+      "review_checklist",
+      "review_for_claude",
+      "claude_prompt",
+      "_review_"
+    ]
+  },
+  "topics": {
+    "min_chars": 4,
+    "max_words": 5,
+    "blocked_suffixes": [
+      " struct",
+      " interface",
+      " enum",
+      " type",
+      " function",
+      " method",
+      " variable",
+      " component",
+      " package",
+      " file"
+    ],
+    "blocked_prefix_patterns": [
+      "\\b(am-[a-z0-9]{4}|issue\\d+)\\b"
+    ]
+  },
+  "entities": {
+    "min_chars": 3,
+    "max_words": 4,
+    "allowlist": [
+      "agentmesh",
+      "claude",
+      "dapr",
+      "go",
+      "kubernetes",
+      "mcp",
+      "python",
+      "temporal"
+    ],
+    "blocked_suffixes": [
+      " struct",
+      " interface",
+      " enum",
+      " type",
+      " function",
+      " method",
+      " variable",
+      " component",
+      " package",
+      " file"
+    ],
+    "blocked_identifier_suffixes": [
+      "Adapter",
+      "Client",
+      "Config",
+      "Dispatcher",
+      "Emitter",
+      "Engine",
+      "Event",
+      "Handler",
+      "Manager",
+      "Pipeline",
+      "Policy",
+      "Registry",
+      "Request",
+      "Response",
+      "Result",
+      "Rule",
+      "State",
+      "Task",
+      "Validator",
+      "Worker"
+    ],
+    "blocked_prefix_patterns": [
+      "\\b(am-[a-z0-9]{4}|issue\\d+)\\b"
+    ],
+    "blocked_word_fragments": [
+      "persona",
+      "stakeholder"
+    ],
+    "blocked_single_word_prefixes": [
+      "exec",
+      "task",
+      "policy",
+      "lease",
+      "route"
+    ]
+  }
+}
