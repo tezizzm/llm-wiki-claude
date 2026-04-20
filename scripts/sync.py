@@ -1,3 +1,14 @@
+"""Sync source files into a workspace's ``raw/inbox/``.
+
+Workspace-aware refactor (LWC-btzz): every path flows from a
+``WorkspacePaths`` instance passed to :func:`main`; no helper reaches into a
+module global for a path.  See ARCHITECTURE §5.1-§5.3, §6, §7.3 for the full
+contract.
+
+The only module-level constant that remains is
+:data:`SYNC_SCHEMA_VERSION`; it is a schema-version literal, not a path.
+"""
+
 import argparse
 import hashlib
 import json
@@ -10,14 +21,13 @@ from typing import Any, Dict, List, Optional
 from pydantic import ValidationError
 
 from scripts.config_models import SyncConfig
+from scripts.workspace import (
+    WorkspacePaths,
+    ensure_workspace_writable,
+    resolve_sync_config,
+)
 
 
-ROOT = Path(__file__).resolve().parents[1]
-RAW_DIR = ROOT / "raw" / "inbox"
-STATE_DIR = ROOT / "state"
-SYNC_CONFIG_PATH = ROOT / "sync-sources.local.json"
-SYNC_FALLBACK_CONFIG_PATH = ROOT / "sync-sources.json"
-SYNC_MANIFEST_PATH = STATE_DIR / "sync_manifest.json"
 SYNC_SCHEMA_VERSION = 1
 
 
@@ -100,8 +110,9 @@ def build_target_name(source_name: str, rel_path: Path, naming: Dict[str, Any]) 
     return f"{stem}{suffix}"
 
 
-def load_sync_manifest() -> Dict[str, Any]:
-    return load_json(SYNC_MANIFEST_PATH, {"files": {}})
+def load_sync_manifest(workspace: WorkspacePaths) -> Dict[str, Any]:
+    """Load the sync manifest from ``workspace.sync_manifest_path`` (or default)."""
+    return load_json(workspace.sync_manifest_path, {"files": {}})
 
 
 def prepare_sync_config(raw_config: Dict[str, Any], config_path: Path) -> tuple[Dict[str, Any], List[str]]:
@@ -130,15 +141,32 @@ def prepare_sync_config(raw_config: Dict[str, Any], config_path: Path) -> tuple[
     return payload, warnings
 
 
-def resolve_config_path(explicit_config: Optional[str] = None) -> Path:
+def resolve_config_path(
+    workspace: WorkspacePaths,
+    explicit_config: Optional[str] = None,
+) -> Path:
+    """Resolve the sync config path for this invocation.
+
+    Precedence:
+      1. ``--config`` (``explicit_config``) when supplied.
+      2. ``workspace.sync_config_path`` when it exists.
+      3. ``workspace.sync_fallback_config_path`` otherwise.
+
+    Unlike :func:`scripts.workspace.resolve_sync_config` this helper never
+    raises on a missing fallback: it returns the fallback path so callers can
+    print a user-facing "config not found at <path>" message.
+    """
     if explicit_config:
         return Path(explicit_config).expanduser()
-    if SYNC_CONFIG_PATH.exists():
-        return SYNC_CONFIG_PATH
-    return SYNC_FALLBACK_CONFIG_PATH
+    try:
+        path, _ = resolve_sync_config(workspace)
+        return path
+    except FileNotFoundError:
+        return workspace.sync_fallback_config_path
 
 
 def sync_file(
+    workspace: WorkspacePaths,
     path: Path,
     source_name: str,
     source_root: Path,
@@ -161,20 +189,20 @@ def sync_file(
         target_name = f"{stem}__{short}{suffix}"
         existing = sync_manifest["files"].get(target_name)
 
-    target_path = RAW_DIR / target_name
+    target_path = workspace.raw_dir / target_name
     if target_path.exists() and not existing:
         short = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
         stem = Path(proposed_name).stem
         suffix = Path(proposed_name).suffix
         target_name = f"{stem}__{short}{suffix}"
-        target_path = RAW_DIR / target_name
+        target_path = workspace.raw_dir / target_name
         existing = sync_manifest["files"].get(target_name)
 
     status = "copied"
     if existing and existing.get("source_key") == key and existing.get("source_sha256") == source_sha:
         status = "unchanged"
     elif not dry_run:
-        RAW_DIR.mkdir(parents=True, exist_ok=True)
+        workspace.raw_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target_path)
 
     sync_manifest["files"][target_name] = {
@@ -204,6 +232,7 @@ def normalize_source(source: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def prune_managed_files(
+    workspace: WorkspacePaths,
     selected_source_names: List[str],
     desired_targets: set[str],
     available_source_names: set[str],
@@ -220,7 +249,7 @@ def prune_managed_files(
         if target_name in desired_targets:
             continue
 
-        raw_path = RAW_DIR / target_name
+        raw_path = workspace.raw_dir / target_name
         print(f"  pruned    raw/inbox/{target_name}")
         if not dry_run and raw_path.exists():
             raw_path.unlink()
@@ -230,18 +259,27 @@ def prune_managed_files(
     return removed
 
 
-def main() -> None:
+def main(argv: list[str], workspace: WorkspacePaths) -> int:
+    """Sync entry point.
+
+    Signature matches the workspace-aware dispatch contract in
+    ``scripts.cli``: every subcommand is called as
+    ``fn(remaining_argv, workspace)`` and returns an int exit code.
+
+    All paths are resolved from ``workspace``; no module-level path constants
+    are consulted.
+    """
     parser = argparse.ArgumentParser(description="Sync selected source files into raw/inbox.")
     parser.add_argument("--config", help="Path to sync config JSON.")
     parser.add_argument("--source", action="append", dest="sources", help="Specific source name(s) to sync.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned actions without copying files.")
     parser.add_argument("--prune", action="store_true", help="Remove previously synced files that no longer match the active config.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    config_path = resolve_config_path(args.config)
+    config_path = resolve_config_path(workspace, args.config)
     if not config_path.exists():
         print(f"Configuration error: sync config not found at {config_path}")
-        return
+        return 0
     try:
         config = load_json(config_path, {})
         prepared_config, warnings = prepare_sync_config(config, config_path)
@@ -249,25 +287,29 @@ def main() -> None:
         sources = [normalize_source(source) for source in validated.model_dump().get("sources", [])]
     except json.JSONDecodeError:
         print(f"Configuration error: invalid JSON in {config_path}")
-        return
+        return 0
     except ValidationError as exc:
         print(f"Configuration error in {config_path}:")
         for error in exc.errors():
             field = ".".join(str(part) for part in error["loc"])
             print(f"- {field}: {error['msg']}")
-        return
+        return 0
     if args.sources:
         wanted = set(args.sources)
         sources = [source for source in sources if source["name"] in wanted]
 
     if not sources:
         print(f"No sync sources configured in {config_path}.")
-        return
+        return 0
 
     for warning in warnings:
         print(f"Compatibility warning: {warning}")
 
-    sync_manifest = load_sync_manifest()
+    # Ensure writable subdirectories exist before we begin copying / writing
+    # the manifest.  ``ensure_workspace_writable`` is idempotent.
+    ensure_workspace_writable(workspace)
+
+    sync_manifest = load_sync_manifest(workspace)
     total_copied = 0
     total_unchanged = 0
     total_pruned = 0
@@ -287,6 +329,7 @@ def main() -> None:
 
         for path in matches:
             result = sync_file(
+                workspace=workspace,
                 path=path,
                 source_name=source["name"],
                 source_root=root,
@@ -306,6 +349,7 @@ def main() -> None:
 
     if args.prune:
         total_pruned = prune_managed_files(
+            workspace=workspace,
             selected_source_names=selected_source_names,
             desired_targets=desired_targets,
             available_source_names=available_source_names,
@@ -314,10 +358,16 @@ def main() -> None:
         )
 
     if not args.dry_run:
-        save_json(SYNC_MANIFEST_PATH, sync_manifest)
+        save_json(workspace.sync_manifest_path, sync_manifest)
 
     print(f"Done. Copied: {total_copied}. Unchanged: {total_unchanged}. Pruned: {total_pruned}.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    # Direct execution path: build a default workspace from the repo root.
+    import sys as _sys
+
+    from scripts.workspace import resolve_workspace
+
+    raise SystemExit(main(_sys.argv[1:], resolve_workspace(None, None)))
