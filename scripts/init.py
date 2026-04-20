@@ -134,7 +134,7 @@ def _write_raw(
 # Fixed workspace .gitignore content (DESIGN §6.2). The leading comment line
 # is part of the contract -- tests compare byte-for-byte.
 _GITIGNORE_CONTENT = (
-    "# llm-wiki workspace -- local state, not for commit\n"
+    "# llm-wiki workspace \u2014 local state, not for commit\n"
     ".env\n"
     "raw/\n"
     "state/\n"

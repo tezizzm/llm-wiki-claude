@@ -297,7 +297,7 @@ def test_init_written_content_matches_packaged_templates(tmp_path: Path) -> None
 # DESIGN §6.2 fixed content. The comment line is part of the contract, and
 # tests compare byte-for-byte.
 EXPECTED_GITIGNORE = (
-    "# llm-wiki workspace -- local state, not for commit\n"
+    "# llm-wiki workspace \u2014 local state, not for commit\n"
     ".env\n"
     "raw/\n"
     "state/\n"
