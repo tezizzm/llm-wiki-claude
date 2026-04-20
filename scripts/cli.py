@@ -162,6 +162,7 @@ def _print_verbose_resolution_block(workspace: WorkspacePaths) -> None:
 
 DISPATCH: dict[str, Callable[[list[str], WorkspacePaths], int]] = {
     "doctor": doctor.main,
+    "sync": sync.main,
 }
 
 
@@ -263,9 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "sync":
-        sys.argv = ["sync.py", *args.sync_args]
-        sync.main()
-        return 0
+        return DISPATCH["sync"](list(args.sync_args), workspace)
     if args.command == "ingest":
         sys.argv = ["ingest.py", *args.ingest_args]
         ingest.main()
@@ -279,11 +278,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         raise SystemExit(DISPATCH["doctor"]([], workspace))
     if args.command == "refresh":
-        sync_argv = ["sync.py", "--prune"]
+        sync_argv: list[str] = ["--prune"]
         if args.dry_run:
             sync_argv.append("--dry-run")
-        sys.argv = sync_argv
-        sync.main()
+        DISPATCH["sync"](sync_argv, workspace)
         if not args.dry_run:
             ingest_argv = ["ingest.py"]
             if args.reconcile:
@@ -292,11 +290,10 @@ def main(argv: list[str] | None = None) -> int:
             ingest.main()
         return 0
     if args.command == "refresh-fast":
-        sync_argv = ["sync.py"]
+        sync_argv = []
         if args.dry_run:
             sync_argv.append("--dry-run")
-        sys.argv = sync_argv
-        sync.main()
+        DISPATCH["sync"](sync_argv, workspace)
         if not args.dry_run:
             sys.argv = ["ingest.py"]
             ingest.main()

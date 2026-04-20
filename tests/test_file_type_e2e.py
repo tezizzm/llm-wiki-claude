@@ -77,12 +77,9 @@ def _scaffold(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(sync, "ROOT", root)
-    monkeypatch.setattr(sync, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(sync, "STATE_DIR", state_dir)
-    monkeypatch.setattr(sync, "SYNC_CONFIG_PATH", root / "sync-sources.local.json")
-    monkeypatch.setattr(sync, "SYNC_FALLBACK_CONFIG_PATH", root / "sync-sources.json")
-    monkeypatch.setattr(sync, "SYNC_MANIFEST_PATH", state_dir / "sync_manifest.json")
+    # sync is now workspace-aware; route it via LLM_WIKI_WORKSPACE so
+    # cli.main resolves the workspace to this tmp project.
+    monkeypatch.setenv("LLM_WIKI_WORKSPACE", str(root))
 
     monkeypatch.setattr(ingest, "ROOT", root)
     monkeypatch.setattr(ingest, "RAW_DIR", raw_dir)
@@ -115,24 +112,25 @@ def _scaffold(tmp_path, monkeypatch):
 
 
 def _write_sync_sources(root, source_root, files):
-    """Write sync-sources.json to include the specified files from source_root."""
-    (root / "sync-sources.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "sources": [
-                    {
-                        "name": "demo",
-                        "root": str(source_root),
-                        "include": files,
-                        "exclude": [],
-                        "naming": {"mode": "preserve_path", "prefix": "demo"},
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
+    """Write sync-sources config into the test workspace (LWC-btzz: sync
+    resolves from workspace.sync_config_path with repo-root fallback; the
+    workspace-local copy lives under ``root``)."""
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "sources": [
+                {
+                    "name": "demo",
+                    "root": str(source_root),
+                    "include": files,
+                    "exclude": [],
+                    "naming": {"mode": "preserve_path", "prefix": "demo"},
+                }
+            ],
+        }
     )
+    (root / "sync-sources.local.json").write_text(payload, encoding="utf-8")
+    (root / "sync-sources.json").write_text(payload, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
