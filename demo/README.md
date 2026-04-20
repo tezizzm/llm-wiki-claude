@@ -9,6 +9,32 @@ Suggested flow:
 3. Run `llm-wiki ingest --reconcile` for a clean first build
 4. Inspect `wiki/`, `index.md`, and `state/last_ingest_run.json`
 
+## Running the demo
+
+The demo runs against the repo-root workspace by default:
+
+```bash
+llm-wiki doctor
+make refresh         # or: make refresh-fast
+make query
+make lint
+```
+
+No `--workspace` flag is needed. The demo intentionally exercises the repo-root default to pin backward compatibility with 0.2.0.
+
+## Running the demo against a separate workspace (optional)
+
+If you want to see how the multi-workspace feature works using the demo data:
+
+```bash
+llm-wiki --workspace /tmp/llm-wiki-demo init
+cp -r demo/* /tmp/llm-wiki-demo/     # or symlink to demo sources in /tmp/llm-wiki-demo/sync-sources.local.json
+llm-wiki --workspace /tmp/llm-wiki-demo refresh-fast
+llm-wiki --workspace /tmp/llm-wiki-demo query
+```
+
+This is entirely optional; the default demo runs in the repo root.
+
 ## Sample Artifacts
 
 If you want to understand the output shape before running anything, inspect the tracked sample artifacts:
