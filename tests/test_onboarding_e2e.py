@@ -165,8 +165,13 @@ def _setup_project_root(tmp_path: Path) -> Path:
 
 
 def _monkeypatch_roots(project: Path, monkeypatch) -> None:
-    """Redirect all ROOT/path constants in scripts to the tmp project dir."""
-    monkeypatch.setattr(doctor, "ROOT", project)
+    """Redirect all ROOT/path constants in scripts to the tmp project dir.
+
+    doctor no longer has a module-level ROOT (AC-2 of LWC-tkbs); instead it
+    consumes a WorkspacePaths.  We route it by setting LLM_WIKI_WORKSPACE so
+    ``cli.main(['doctor'])`` resolves the workspace to the project dir.
+    """
+    monkeypatch.setenv("LLM_WIKI_WORKSPACE", str(project))
     monkeypatch.setattr(ingest_mod, "ROOT", project)
     monkeypatch.setattr(ingest_mod, "RAW_DIR", project / "raw" / "inbox")
     monkeypatch.setattr(ingest_mod, "WIKI_DIR", project / "wiki")
@@ -273,15 +278,13 @@ class TestDoctorExitsZero:
         assert code == 0, f"doctor exit code was {code}, output:\n{output}"
 
     def test_doctor_all_pass(self, built_project, capsys):
+        """Under the new FAIL/WARN/OK policy, 'all pass' means 0 failures."""
         code, output = _run_doctor(capsys)
-        check_lines = [
-            line for line in output.splitlines() if line.strip().startswith("[")
-        ]
-        assert len(check_lines) >= 1, "Expected at least one check line"
-        for line in check_lines:
-            assert line.strip().startswith("[PASS]"), (
-                f"Expected [PASS] but got: {line}"
-            )
+        lines = [line for line in output.splitlines() if line.strip()]
+        assert lines[-1].startswith("doctor: 0 failures"), (
+            f"Expected summary to report 0 failures; got: {lines[-1]}"
+        )
+        assert code == 0
 
 
 # ---------------------------------------------------------------------------
