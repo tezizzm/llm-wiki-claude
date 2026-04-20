@@ -84,13 +84,11 @@ def _build_workspace(root: Path, *, with_sources: int = 1):
 
 def _read_events(workspace) -> List[dict]:
     path = workspace.ingest_events_path
-    if not path.exists():
-        return []
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
 def _fake_response(text: str, input_tokens: int, output_tokens: int) -> SimpleNamespace:
@@ -159,6 +157,24 @@ def test_ingest_no_direct_anthropic_import():
     assert not re.search(r"(?m)^\s*from\s+anthropic\b", text), (
         "scripts/ingest.py imports from the anthropic SDK directly"
     )
+
+
+# ---------------------------------------------------------------------------
+# _read_events helper coverage: missing-file branch
+#
+# The populated-file branch is covered end-to-end by every main()-driven test
+# below.  The missing-file branch is not otherwise reached (all main() paths
+# emit at least the run_summary event before any ``_read_events`` call), so we
+# exercise it directly against a real filesystem workspace here.  No mocks.
+# ---------------------------------------------------------------------------
+
+
+def test_read_events_returns_empty_list_when_events_file_missing(tmp_path):
+    """Missing-file branch of ``_read_events``: returns [] via FileNotFoundError."""
+
+    workspace = _build_workspace(tmp_path / "ws", with_sources=0)
+    assert not workspace.ingest_events_path.exists()
+    assert _read_events(workspace) == []
 
 
 # ---------------------------------------------------------------------------
