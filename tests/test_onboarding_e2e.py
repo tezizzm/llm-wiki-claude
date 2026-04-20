@@ -190,12 +190,9 @@ def _monkeypatch_roots(project: Path, monkeypatch) -> None:
     monkeypatch.setattr(ingest_mod, "INGEST_REPORT_PATH", project / "state" / "last_ingest_report.md")
     monkeypatch.setattr(ingest_mod, "SCHEMA_PATH", project / "schemas" / "AGENTS.md")
 
-    monkeypatch.setattr(sync_mod, "ROOT", project)
-    monkeypatch.setattr(sync_mod, "RAW_DIR", project / "raw" / "inbox")
-    monkeypatch.setattr(sync_mod, "STATE_DIR", project / "state")
-    monkeypatch.setattr(sync_mod, "SYNC_CONFIG_PATH", project / "sync-sources.local.json")
-    monkeypatch.setattr(sync_mod, "SYNC_FALLBACK_CONFIG_PATH", project / "sync-sources.json")
-    monkeypatch.setattr(sync_mod, "SYNC_MANIFEST_PATH", project / "state" / "sync_manifest.json")
+    # sync is now workspace-aware (LWC-btzz): the LLM_WIKI_WORKSPACE env var
+    # set above routes cli.main(['sync']) to the tmp project without needing
+    # to patch module-level path constants.
 
     monkeypatch.setattr(lint, "ROOT", project)
     monkeypatch.setattr(lint, "WIKI_DIR", project / "wiki")
@@ -231,8 +228,10 @@ def _run_lint(capsys):
 
 def _run_sync(monkeypatch):
     """Run sync to populate raw/inbox from demo corpus."""
-    monkeypatch.setattr(sys, "argv", ["sync.py"])
-    sync_mod.main()
+    # sync.main is now workspace-aware (LWC-btzz): invoke it via the cli so
+    # the workspace (set via LLM_WIKI_WORKSPACE in _monkeypatch_roots) is
+    # resolved through the canonical path.
+    cli.main(["sync"])
 
 
 def _run_ingest(mock_client, monkeypatch):
