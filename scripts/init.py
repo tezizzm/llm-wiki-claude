@@ -4,13 +4,16 @@ Implements ``llm-wiki init PATH [--force]`` (ARCHITECTURE §8.1-§8.3,
 DESIGN §5.1). Creates the workspace directory tree and writes template
 files from the ``scripts.templates`` package.
 
-Scope for this story (LWC-zsy4):
+Scope through story LWC-7wkk:
 
-- Directory + template file scaffolding only.
-- Does NOT write ``.gitignore`` (separate story in the init epic).
-- Does NOT perform git-safety detection (separate story in the init epic).
-- Does NOT emit the final structured summary output (separate story);
-  a minimal message is printed for now so the command is usable end-to-end.
+- Directory + template file scaffolding (LWC-zsy4).
+- Workspace ``.gitignore`` writing (DESIGN §6.2) (LWC-7wkk).
+- Git-safety detection: walk up from the target's parent looking for an
+  outer ``.git`` entry (ARCHITECTURE §8.5, DESIGN §6.3) (LWC-7wkk).
+- Does NOT emit the final structured summary output (separate story
+  LWC-wn2r); a minimal message is printed for now so the command is
+  usable end-to-end. The outer-repo warning block is likewise emitted
+  as a minimal placeholder pending LWC-wn2r.
 
 Error contract (ARCHITECTURE §8.3, DESIGN §10.3/§10.4):
 
@@ -124,6 +127,73 @@ def _write_raw(
 
 
 # ---------------------------------------------------------------------------
+# .gitignore + git-safety (DESIGN §6.2, §6.3; ARCHITECTURE §8.5)
+# ---------------------------------------------------------------------------
+
+
+# Fixed workspace .gitignore content (DESIGN §6.2). The leading comment line
+# is part of the contract -- tests compare byte-for-byte.
+_GITIGNORE_CONTENT = (
+    "# llm-wiki workspace -- local state, not for commit\n"
+    ".env\n"
+    "raw/\n"
+    "state/\n"
+    "wiki/\n"
+)
+
+
+def _write_gitignore(
+    target: Path,
+    force: bool,
+    created: list[str],
+    skipped: list[str],
+    overwrote: list[str],
+) -> None:
+    """Write the fixed DESIGN §6.2 ``.gitignore`` to ``target``.
+
+    Create/skip/overwrite semantics match :func:`_write_raw`:
+
+    - Missing destination                    -> created.
+    - Existing destination + ``force=False`` -> skipped.
+    - Existing destination + ``force=True``  -> overwritten.
+    """
+
+    _write_raw(
+        target / ".gitignore",
+        _GITIGNORE_CONTENT,
+        force,
+        created,
+        skipped,
+        overwrote,
+    )
+
+
+def _detect_outer_git_repo(target: Path) -> Path | None:
+    """Walk up from ``target.parent`` looking for an enclosing git repo.
+
+    Returns the first ancestor directory containing a ``.git`` entry (file,
+    directory, or symlink), else ``None``. ``.git`` at ``target`` itself is
+    intentionally NOT detected -- a workspace that *is* its own git repo is
+    fine.
+
+    ``target.parent`` is resolved via ``Path.resolve()`` so symlinked target
+    directories walk the real filesystem tree, not the symlink chain.
+    """
+
+    # Resolve the target first so a symlinked target directory walks the real
+    # filesystem tree, not the symlink chain. ``strict=False`` lets us resolve
+    # paths that do not yet exist (init may run on a yet-to-be-created dir).
+    start = target.resolve(strict=False).parent
+    current = start
+    # ``current.parent == current`` only at the filesystem root.
+    while current != current.parent:
+        if (current / ".git").exists():
+            return current
+        current = current.parent
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -233,6 +303,10 @@ def main(argv: list[str]) -> int:
             target / "log.md", "", args.force,
             created, skipped, overwrote,
         )
+
+        # 4. Workspace .gitignore (DESIGN §6.2). Always written; same
+        #    create/skip/overwrite policy as template files.
+        _write_gitignore(target, args.force, created, skipped, overwrote)
     except PermissionError:
         print(
             f"Init error: cannot write to {target} (permission denied).",
@@ -240,9 +314,15 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    # 4. .gitignore + git-safety detection + structured summary output are
-    #    owned by subsequent stories in this epic. For now emit a minimal
-    #    completion message so the command is observably successful.
+    # 5. Git-safety detection (ARCHITECTURE §8.5, DESIGN §6.3). Walk up from
+    #    the target's parent; if a ``.git`` entry lives in any ancestor, the
+    #    workspace is nested inside an existing repository and the user gets
+    #    a warning so they don't accidentally commit wiki state into it.
+    outer_repo = _detect_outer_git_repo(target)
+
+    # 6. Structured summary output is owned by story LWC-wn2r. For now emit
+    #    a minimal completion message + the DESIGN §6.3 warning block (so
+    #    the command is observably correct end-to-end).
     print(f"Initialized workspace at {target}")
     if created:
         print(f"  created:    {len(created)}")
@@ -250,6 +330,14 @@ def main(argv: list[str]) -> int:
         print(f"  overwrote:  {len(overwrote)}")
     if skipped:
         print(f"  skipped:    {len(skipped)}")
+
+    if outer_repo is not None:
+        print(
+            f"\nWarning: {target} is inside an existing\n"
+            f"git repository ({outer_repo}). A workspace .gitignore\n"
+            f"was written covering .env, raw/, state/, and wiki/, but you\n"
+            f"should verify before committing."
+        )
 
     return 0
 

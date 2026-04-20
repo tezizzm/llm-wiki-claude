@@ -287,3 +287,148 @@ def test_init_written_content_matches_packaged_templates(tmp_path: Path) -> None
         assert (target / dest_rel).read_text(encoding="utf-8") == _template_text(
             template_name
         ), f"{dest_rel} does not match its source template"
+
+
+# ---------------------------------------------------------------------------
+# LWC-7wkk: workspace .gitignore (DESIGN §6.2)
+# ---------------------------------------------------------------------------
+
+
+# DESIGN §6.2 fixed content. The comment line is part of the contract, and
+# tests compare byte-for-byte.
+EXPECTED_GITIGNORE = (
+    "# llm-wiki workspace -- local state, not for commit\n"
+    ".env\n"
+    "raw/\n"
+    "state/\n"
+    "wiki/\n"
+)
+
+
+def test_init_writes_gitignore_with_expected_content(tmp_path: Path) -> None:
+    """AC 1: init writes PATH/.gitignore with exactly the DESIGN §6.2 text."""
+    target = tmp_path / "ws"
+    assert init_module.main([str(target)]) == 0
+
+    gitignore = target / ".gitignore"
+    assert gitignore.is_file(), ".gitignore was not written"
+    assert gitignore.read_text(encoding="utf-8") == EXPECTED_GITIGNORE
+
+
+def test_init_gitignore_skipped_on_bare_reinit(tmp_path: Path) -> None:
+    """AC 2: bare re-run must NOT overwrite an existing .gitignore."""
+    target = tmp_path / "ws"
+    assert init_module.main([str(target)]) == 0
+
+    gitignore = target / ".gitignore"
+    user_content = "# user-customized ignore\nmy-secret.txt\n"
+    gitignore.write_text(user_content, encoding="utf-8")
+
+    # Bare re-run must leave the user's content intact.
+    assert init_module.main([str(target)]) == 0
+    assert gitignore.read_text(encoding="utf-8") == user_content
+
+
+def test_init_gitignore_overwritten_with_force(tmp_path: Path) -> None:
+    """AC 2: --force restores .gitignore to canonical content."""
+    target = tmp_path / "ws"
+    assert init_module.main([str(target)]) == 0
+
+    gitignore = target / ".gitignore"
+    gitignore.write_text("MUTATED\n", encoding="utf-8")
+
+    assert init_module.main([str(target), "--force"]) == 0
+    assert gitignore.read_text(encoding="utf-8") == EXPECTED_GITIGNORE
+
+
+# ---------------------------------------------------------------------------
+# LWC-7wkk: outer-git-repo detection (ARCHITECTURE §8.5, DESIGN §6.3)
+# ---------------------------------------------------------------------------
+
+
+def test_init_detects_outer_git_repo_and_warns(
+    tmp_path: Path, capsys
+) -> None:
+    """AC 3, 7: target inside an existing git repo returns that repo's root."""
+    outer = tmp_path / "repo"
+    (outer / ".git").mkdir(parents=True)
+    target = outer / "subdir"
+
+    assert init_module.main([str(target)]) == 0
+
+    assert init_module._detect_outer_git_repo(target) == outer.resolve()
+
+    captured = capsys.readouterr()
+    # The minimal placeholder warning is emitted so end-to-end behavior is
+    # observably correct even before LWC-wn2r lands.
+    assert "inside an existing" in captured.out
+    assert "git repository" in captured.out
+    assert str(outer.resolve()) in captured.out
+
+
+def test_init_does_not_warn_when_outside_git(
+    tmp_path: Path, capsys
+) -> None:
+    """AC 3: a plain tmp_path has no enclosing .git -> returns None."""
+    # Defensive: make sure no ancestor of tmp_path has a .git entry that would
+    # confuse the walk-up. Pytest's tmp_path lives under a unique subdirectory
+    # of the system temp dir, so this is normally safe.
+    target = tmp_path / "ws"
+
+    assert init_module.main([str(target)]) == 0
+
+    # We only assert None if the *real* tmp_path has no enclosing repo. On CI
+    # or in a sandbox this is always true; skip otherwise to avoid false
+    # failures from developers running tests inside a repo whose temp dir is
+    # nested under .git.
+    if init_module._detect_outer_git_repo(tmp_path / "any") is None:
+        assert init_module._detect_outer_git_repo(target) is None
+        captured = capsys.readouterr()
+        assert "Warning:" not in captured.out
+
+
+def test_init_does_not_warn_when_target_is_own_repo(tmp_path: Path) -> None:
+    """AC 4: .git at target itself is NOT treated as an outer repo."""
+    # Set up tmp_path/ws/.git but leave tmp_path with no .git entry.
+    if init_module._detect_outer_git_repo(tmp_path / "probe") is not None:
+        pytest.skip("tmp_path is nested inside a real git repo; test is moot")
+
+    target = tmp_path / "ws"
+    target.mkdir()
+    (target / ".git").mkdir()
+
+    assert init_module._detect_outer_git_repo(target) is None
+
+
+def test_init_detects_submodule_git_file(tmp_path: Path) -> None:
+    """AC 5: a .git FILE (submodule/worktree pointer) still counts."""
+    outer = tmp_path / "repo"
+    outer.mkdir()
+    # Submodules and linked worktrees use a .git file instead of a directory.
+    (outer / ".git").write_text("gitdir: ../.git/modules/repo\n", encoding="utf-8")
+
+    target = outer / "sub"
+    assert init_module._detect_outer_git_repo(target) == outer.resolve()
+
+
+def test_init_detects_outer_repo_through_symlinked_target(
+    tmp_path: Path,
+) -> None:
+    """AC 6: walk-up resolves symlinks and finds the real parent repo."""
+    if sys.platform.startswith("win"):
+        pytest.skip("symlink semantics differ on Windows")
+
+    outer = tmp_path / "repo"
+    (outer / ".git").mkdir(parents=True)
+    real_target = outer / "subdir"
+    real_target.mkdir()
+
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real_target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("filesystem does not support symlinks")
+
+    # Walking up from the symlink's parent (tmp_path) would NOT find the repo;
+    # walking up from the resolved real path (outer/subdir) DOES.
+    assert init_module._detect_outer_git_repo(link) == outer.resolve()
