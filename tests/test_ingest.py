@@ -1,32 +1,149 @@
-import importlib.util
+"""Unit + integration tests for scripts.ingest (LWC-1idw refactor).
+
+After LWC-1idw every test in this module uses either the shared
+``tmp_workspace`` fixture from ``tests/conftest.py`` (LWC-tkbs) or the local
+``_make_workspace`` helper -- the latter remains for tests that need bespoke
+pre-seeded layouts (pre-populated raw/inbox content, stale manifest, a specific
+ingest-settings.json).  Monkeypatching of module-level path constants on
+``scripts.ingest`` is FORBIDDEN: those constants were deleted in LWC-4z0t
+(ARCHITECTURE §5.3, §11.1, §11.3).
+
+Ingest mocks go through ``scripts.claude_api.call_claude`` (as imported into
+``scripts.ingest``), returning a real ``ClaudeCallResult`` whose ``text`` field
+is a JSON payload the ingest parser accepts.  Patching ``ingest.call_claude``
+exercises the real ``ingest.call_claude_json`` -- the JSON extraction + parse
+path + totals bookkeeping -- so we catch regressions in that plumbing rather
+than bypassing it.
+"""
+
+from __future__ import annotations
+
 import json
+import re
 import sys
 from datetime import datetime as real_datetime
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-INGEST_PATH = ROOT / "scripts" / "ingest.py"
-spec = importlib.util.spec_from_file_location("ingest_module", INGEST_PATH)
-ingest = importlib.util.module_from_spec(spec)
-assert spec and spec.loader
-spec.loader.exec_module(ingest)
+# LWC-1idw: load via the canonical import so monkeypatching ``ingest.call_claude``
+# targets the same module object the CLI dispatch uses.  The previous
+# ``importlib.util.spec_from_file_location`` pattern created a sibling module
+# that diverged from ``scripts.ingest`` and could mask integration bugs.
+from scripts import ingest  # noqa: E402
+from scripts.claude_api import ClaudeCallResult  # noqa: E402
+from scripts.workspace import resolve_workspace  # noqa: E402
 
-from scripts.workspace import resolve_workspace
+
+# ---------------------------------------------------------------------------
+# Mock helpers
+# ---------------------------------------------------------------------------
 
 
 def _make_workspace(root: Path):
     """Return a WorkspacePaths rooted at ``root`` with source='flag'.
 
-    Tests call this instead of the ``tmp_workspace`` fixture when they need a
-    bespoke layout (e.g. seeding schemas/, an .ingest-settings.json at the
-    workspace root, or a pre-populated raw/inbox before invoking ingest.main).
+    Tests call this when the shared ``tmp_workspace`` fixture (conftest.py) does
+    not fit -- e.g. when they need to seed raw/inbox before ingest runs, or
+    to pre-write a specific ingest-settings.json or schemas/AGENTS.md.
     """
     root.mkdir(parents=True, exist_ok=True)
     return resolve_workspace(str(root), None)
+
+
+def _claude_api_mock(payload: dict, *, input_tokens: int = 100, output_tokens: int = 50):
+    """Return a mock for ``scripts.claude_api.call_claude``.
+
+    The returned callable accepts the same keyword-only signature as the real
+    ``call_claude`` (client, model, system, messages, max_tokens, context,
+    workspace, log_event) plus ``**kw`` to absorb future additions.  It emits a
+    ``ClaudeCallResult`` whose ``text`` is ``json.dumps(payload)`` -- the shape
+    the ingest parser requires.  Returning raw echo text would silently produce
+    empty wiki pages (vacuous pass).
+    """
+
+    def _fn(*, client=None, model="fake-model", system=None, messages=None,
+            max_tokens=None, context=None, workspace=None, log_event=True, **kw):
+        return ClaudeCallResult(
+            text=json.dumps(payload),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            model=model,
+        )
+
+    return _fn
+
+
+def _claude_api_mock_iter(payloads: list[dict], *, input_tokens: int = 100, output_tokens: int = 50):
+    """Return a mock that pops a different payload on each successive call."""
+
+    pending = iter(payloads)
+
+    def _fn(*, client=None, model="fake-model", system=None, messages=None,
+            max_tokens=None, context=None, workspace=None, log_event=True, **kw):
+        return ClaudeCallResult(
+            text=json.dumps(next(pending)),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            model=model,
+        )
+
+    return _fn
+
+
+DEFAULT_INGEST_PAYLOAD = {
+    "title": "Demo Knowledge Page",
+    "summary": "AgentMesh coordinates distributed agent work through a registry and router.",
+    "key_facts": [
+        "AgentMesh has a capability registry",
+        "AgentMesh has an agent router",
+    ],
+    "topics": ["Capability Registry", "Agent Router"],
+    "entities": ["AgentMesh", "Dapr"],
+    "open_questions": ["How should routing policies evolve?"],
+    "topic_summaries": {
+        "Capability Registry": "Registry for agent capabilities.",
+        "Agent Router": "Routes work to the right capability.",
+    },
+    "entity_summaries": {
+        "AgentMesh": "Distributed control plane for agent ecosystems.",
+        "Dapr": "Runtime substrate used by AgentMesh.",
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# LWC-1idw AC: ingest does not import anthropic directly
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_no_direct_anthropic_import():
+    """scripts/ingest.py must not import the anthropic SDK directly.
+
+    All SDK access flows through ``scripts.claude_api``; ingest depends on that
+    wrapper module's ``call_claude`` + ``ClaudeCallResult``, never on anthropic
+    itself.  Duplicates the assertion in test_ingest_run_summary.py so that
+    LWC-1idw AC 1.e is explicitly met in the test_ingest.py file named by the
+    story.
+    """
+    text = (ROOT / "scripts" / "ingest.py").read_text(encoding="utf-8")
+    assert not re.search(r"(?m)^\s*import\s+anthropic\b", text), (
+        "scripts/ingest.py imports the anthropic SDK directly"
+    )
+    assert not re.search(r"(?m)^\s*from\s+anthropic\b", text), (
+        "scripts/ingest.py imports from the anthropic SDK directly"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers -- exercised directly, no workspace (or a tmp one) required
+# ---------------------------------------------------------------------------
 
 
 def test_template_ingest_settings_is_shareable():
@@ -234,7 +351,20 @@ def test_extract_text_supports_pdf_via_pdf_reader(monkeypatch, tmp_path):
     assert ingest.extract_text(pdf_path) == "PDF content"
 
 
+# ---------------------------------------------------------------------------
+# Integration: ingest.main([], workspace) with JSON-shaped call_claude mock
+# ---------------------------------------------------------------------------
+
+
 def test_ingest_main_builds_expected_summary_from_fixture(tmp_path, monkeypatch):
+    """End-to-end: ``main([], workspace)`` with a mocked call_claude produces
+    the golden summary.md from the ``tests/fixtures/ingest/basic`` corpus.
+
+    The mock patches ``ingest.call_claude`` -- the wrapper's name as imported
+    into the ingest module -- so the real ``call_claude_json`` still runs
+    (JSON extraction, totals bookkeeping).  The mock returns a ClaudeCallResult
+    whose ``text`` field is a JSON payload parseable by the ingest parser.
+    """
     fixture_root = Path("tests/fixtures/ingest/basic")
     raw_fixture = fixture_root / "raw" / "demo.md"
     expected_summary = (fixture_root / "golden" / "summary.md").read_text(encoding="utf-8")
@@ -253,8 +383,6 @@ def test_ingest_main_builds_expected_summary_from_fixture(tmp_path, monkeypatch)
     (raw_dir / "demo.md").write_text(raw_fixture.read_text(encoding="utf-8"), encoding="utf-8")
 
     workspace = _make_workspace(workspace_root)
-    state_dir = workspace.state_dir
-    wiki_dir = workspace.wiki_dir
 
     class FixedDateTime:
         @staticmethod
@@ -263,48 +391,29 @@ def test_ingest_main_builds_expected_summary_from_fixture(tmp_path, monkeypatch)
 
     monkeypatch.setattr(ingest, "datetime", FixedDateTime)
     monkeypatch.setattr(ingest, "init_client", lambda: ("fake-client", "fake-model"))
-    monkeypatch.setattr(
-        ingest,
-        "call_claude_json",
-        lambda *args, **kwargs: {
-            "title": "Demo Knowledge Page",
-            "summary": "AgentMesh coordinates distributed agent work through a registry and router.",
-            "key_facts": [
-                "AgentMesh has a capability registry",
-                "AgentMesh has an agent router",
-            ],
-            "topics": ["Capability Registry", "Agent Router"],
-            "entities": ["AgentMesh", "Dapr"],
-            "open_questions": ["How should routing policies evolve?"],
-            "topic_summaries": {
-                "Capability Registry": "Registry for agent capabilities.",
-                "Agent Router": "Routes work to the right capability.",
-            },
-            "entity_summaries": {
-                "AgentMesh": "Distributed control plane for agent ecosystems.",
-                "Dapr": "Runtime substrate used by AgentMesh.",
-            },
-        },
-    )
+    monkeypatch.setattr(ingest, "call_claude", _claude_api_mock(DEFAULT_INGEST_PAYLOAD))
 
     rc = ingest.main([], workspace)
     assert rc == 0
 
-    summary_path = wiki_dir / "summaries" / "demo.md"
+    summary_path = workspace.wiki_dir / "summaries" / "demo.md"
     assert summary_path.read_text(encoding="utf-8") == expected_summary
-    manifest = json.loads((state_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads(workspace.manifest_path.read_text(encoding="utf-8"))
     assert "raw/inbox/demo.md" in manifest["files"]
     assert manifest["files"]["raw/inbox/demo.md"]["topic_slugs"] == ["agent-router", "capability-registry"]
-    run_summary = json.loads((state_dir / "last_ingest_run.json").read_text(encoding="utf-8"))
+    run_summary = json.loads(workspace.last_ingest_run_path.read_text(encoding="utf-8"))
     assert run_summary["processed"] == 1
     assert run_summary["page_stats"]["topics"] == 2
-    event_lines = (state_dir / "ingest_events.jsonl").read_text(encoding="utf-8").strip().splitlines()
-    # LWC-n3um added a trailing run_summary event emitted just before return 0.
+    event_lines = workspace.ingest_events_path.read_text(encoding="utf-8").strip().splitlines()
+    # LWC-n3um emits: claude_api_call (from call_claude) + ingest_file_started +
+    # ingest_file_completed + run_summary.  The claude_api_call event is added
+    # by the real call_claude wrapper, which the mock short-circuits -- so with
+    # a mocked call_claude we get three events: started, completed, run_summary.
     assert len(event_lines) == 3
     assert json.loads(event_lines[0])["event"] == "ingest_file_started"
     assert json.loads(event_lines[1])["event"] == "ingest_file_completed"
     assert json.loads(event_lines[2])["event"] == "run_summary"
-    assert (state_dir / "last_ingest_report.md").exists()
+    assert workspace.ingest_report_path.exists()
 
 
 def test_ingest_dry_run_reports_actions_without_writing(tmp_path):
@@ -364,17 +473,19 @@ def test_ingest_reconcile_resets_stale_outputs(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest, "init_client", lambda: ("fake-client", "fake-model"))
     monkeypatch.setattr(
         ingest,
-        "call_claude_json",
-        lambda *args, **kwargs: {
-            "title": "Fresh",
-            "summary": "Fresh summary",
-            "key_facts": [],
-            "topics": [],
-            "entities": [],
-            "open_questions": [],
-            "topic_summaries": {},
-            "entity_summaries": {},
-        },
+        "call_claude",
+        _claude_api_mock(
+            {
+                "title": "Fresh",
+                "summary": "Fresh summary",
+                "key_facts": [],
+                "topics": [],
+                "entities": [],
+                "open_questions": [],
+                "topic_summaries": {},
+                "entity_summaries": {},
+            }
+        ),
     )
 
     workspace = _make_workspace(workspace_root)
@@ -424,17 +535,19 @@ def test_ingest_cleans_stale_manifest_entries_without_full_reconcile(tmp_path, m
     monkeypatch.setattr(ingest, "init_client", lambda: ("fake-client", "fake-model"))
     monkeypatch.setattr(
         ingest,
-        "call_claude_json",
-        lambda *args, **kwargs: {
-            "title": "Fresh",
-            "summary": "Fresh summary",
-            "key_facts": [],
-            "topics": [],
-            "entities": [],
-            "open_questions": [],
-            "topic_summaries": {},
-            "entity_summaries": {},
-        },
+        "call_claude",
+        _claude_api_mock(
+            {
+                "title": "Fresh",
+                "summary": "Fresh summary",
+                "key_facts": [],
+                "topics": [],
+                "entities": [],
+                "open_questions": [],
+                "topic_summaries": {},
+                "entity_summaries": {},
+            }
+        ),
     )
 
     workspace = _make_workspace(workspace_root)
@@ -467,32 +580,34 @@ def test_ingest_updates_source_contributions_when_topics_change(tmp_path, monkey
     )
 
     monkeypatch.setattr(ingest, "get_schema_text", lambda ws: "schema")
-
-    responses = iter(
-        [
-            {
-                "title": "Demo",
-                "summary": "First pass",
-                "key_facts": [],
-                "topics": ["Alpha Topic"],
-                "entities": [],
-                "open_questions": [],
-                "topic_summaries": {"Alpha Topic": "Alpha"},
-                "entity_summaries": {},
-            },
-            {
-                "title": "Demo",
-                "summary": "Second pass",
-                "key_facts": [],
-                "topics": ["Beta Topic"],
-                "entities": [],
-                "open_questions": [],
-                "topic_summaries": {"Beta Topic": "Beta"},
-                "entity_summaries": {},
-            },
-        ]
+    monkeypatch.setattr(
+        ingest,
+        "call_claude",
+        _claude_api_mock_iter(
+            [
+                {
+                    "title": "Demo",
+                    "summary": "First pass",
+                    "key_facts": [],
+                    "topics": ["Alpha Topic"],
+                    "entities": [],
+                    "open_questions": [],
+                    "topic_summaries": {"Alpha Topic": "Alpha"},
+                    "entity_summaries": {},
+                },
+                {
+                    "title": "Demo",
+                    "summary": "Second pass",
+                    "key_facts": [],
+                    "topics": ["Beta Topic"],
+                    "entities": [],
+                    "open_questions": [],
+                    "topic_summaries": {"Beta Topic": "Beta"},
+                    "entity_summaries": {},
+                },
+            ]
+        ),
     )
-    monkeypatch.setattr(ingest, "call_claude_json", lambda *args, **kwargs: next(responses))
 
     workspace = _make_workspace(workspace_root)
     settings = ingest.load_ingest_settings(workspace)
@@ -511,6 +626,114 @@ def test_ingest_updates_source_contributions_when_topics_change(tmp_path, monkey
     assert not (wiki_dir / "topics" / "alpha-topic.md").exists()
     beta_content = (wiki_dir / "topics" / "beta-topic.md").read_text(encoding="utf-8")
     assert "<!-- SOURCE:demo.md -->" in beta_content
+
+
+# ---------------------------------------------------------------------------
+# LWC-1idw AC 6: end-to-end non-emptiness precondition
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_end_to_end_populates_wiki(tmp_workspace, monkeypatch):
+    """After ingest.main succeeds, each wiki subdir has >= 1 file.
+
+    This is the canonical non-emptiness precondition from LWC-1idw AC 3:
+    empty output means the mock failed to produce parseable JSON, and the test
+    must FAIL loudly rather than pass trivially on zero wiki files.
+
+    Uses the shared ``tmp_workspace`` fixture from conftest.  The fixture
+    already populates raw/inbox with ``placeholder.md`` and writes
+    ``ingest-settings.local.json`` + ``.env`` -- everything ingest.main needs
+    beyond the schemas/ directory, which we seed here.
+    """
+    (tmp_workspace.root / "schemas").mkdir(parents=True, exist_ok=True)
+    (tmp_workspace.root / "schemas" / "AGENTS.md").write_text("schema", encoding="utf-8")
+    (tmp_workspace.root / ".wikiignore").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(ingest, "init_client", lambda: ("fake-client", "fake-model"))
+    monkeypatch.setattr(ingest, "call_claude", _claude_api_mock(DEFAULT_INGEST_PAYLOAD))
+
+    rc = ingest.main([], tmp_workspace)
+    assert rc == 0
+
+    # Non-emptiness precondition: every wiki subdir has at least one file.
+    summaries = list(tmp_workspace.summaries_dir.glob("*.md"))
+    topics = list(tmp_workspace.topics_dir.glob("*.md"))
+    entities = list(tmp_workspace.entities_dir.glob("*.md"))
+    assert len(summaries) >= 1, (
+        f"expected >= 1 summary, got {len(summaries)} -- JSON mock likely not parseable"
+    )
+    assert len(topics) >= 1, (
+        f"expected >= 1 topic, got {len(topics)} -- JSON mock likely not parseable"
+    )
+    assert len(entities) >= 1, (
+        f"expected >= 1 entity, got {len(entities)} -- JSON mock likely not parseable"
+    )
+
+    # And the run_summary event is emitted exactly once per successful run.
+    events = [
+        json.loads(line)
+        for line in tmp_workspace.ingest_events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    run_summaries = [e for e in events if e["event"] == "run_summary"]
+    assert len(run_summaries) == 1
+    assert run_summaries[0]["api_call_count"] == len(summaries)
+    assert run_summaries[0]["total_input_tokens"] == 100 * len(summaries)
+    assert run_summaries[0]["total_output_tokens"] == 50 * len(summaries)
+
+
+def test_ingest_main_run_summary_absent_on_midrun_crash(tmp_path, monkeypatch):
+    """LWC-n3um atomicity: if ``main`` raises, no run_summary event is emitted.
+
+    The story (LWC-1idw) requires a test asserting run_summary event shape and
+    atomicity.  Shape is covered above (exactly one run_summary event on every
+    successful return 0); atomicity is covered here by exercising the
+    contrapositive.
+
+    ``ingest.main`` swallows per-file exceptions inside the ``for path in
+    actions['to_ingest']`` loop (so call_claude failures become ``errors`` in
+    the run report, not propagated exceptions).  Atomicity instead applies to
+    crashes OUTSIDE that try/except -- for example an exception inside
+    ``refine_merged_pages`` or ``update_index`` after the file loop.  Patching
+    ``update_index`` to raise exercises that path cleanly.
+    """
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    raw_dir = workspace_root / "raw" / "inbox"
+    schemas_dir = workspace_root / "schemas"
+    raw_dir.mkdir(parents=True)
+    schemas_dir.mkdir(parents=True)
+    (schemas_dir / "AGENTS.md").write_text("schema", encoding="utf-8")
+    (workspace_root / ".wikiignore").write_text("", encoding="utf-8")
+    (workspace_root / "ingest-settings.json").write_text(
+        Path("ingest-settings.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (raw_dir / "demo.md").write_text("demo", encoding="utf-8")
+
+    workspace = _make_workspace(workspace_root)
+
+    monkeypatch.setattr(ingest, "init_client", lambda: ("fake-client", "fake-model"))
+    monkeypatch.setattr(ingest, "call_claude", _claude_api_mock(DEFAULT_INGEST_PAYLOAD))
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("mid-run crash after file loop")
+
+    monkeypatch.setattr(ingest, "update_index", _boom)
+
+    with pytest.raises(RuntimeError, match="mid-run crash after file loop"):
+        ingest.main([], workspace)
+
+    # No run_summary should have been appended; the _emit_run_summary call sits
+    # after update_index(), so the crash skips it entirely.
+    if workspace.ingest_events_path.exists():
+        events = [
+            json.loads(line)
+            for line in workspace.ingest_events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert not [e for e in events if e.get("event") == "run_summary"], (
+            "run_summary event was written despite a mid-run crash -- atomicity broken"
+        )
 
 
 # --- HTML extraction tests (LWC-wyli) ---
@@ -672,6 +895,7 @@ def test_extract_rst_text_missing_docutils(tmp_path, monkeypatch):
 
 
 # ---------- DOCX extraction tests ----------
+
 
 def test_extract_docx_text_multiple_paragraphs(tmp_path):
     """Integration test: DOCX with multiple paragraphs -> text extracted."""
