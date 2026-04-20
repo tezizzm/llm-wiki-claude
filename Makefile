@@ -10,7 +10,7 @@ install-editable:
 	. .venv/bin/activate && pip install --no-build-isolation -e '.[dev]'
 
 config:
-	. .venv/bin/activate && python scripts/show_config.py
+	. .venv/bin/activate && llm-wiki show-config
 
 sync:
 	. .venv/bin/activate && python scripts/sync.py
