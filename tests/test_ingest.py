@@ -266,7 +266,7 @@ def test_ingest_main_builds_expected_summary_from_fixture(tmp_path, monkeypatch)
     monkeypatch.setattr(
         ingest,
         "call_claude_json",
-        lambda client, model, system_prompt, user_prompt: {
+        lambda *args, **kwargs: {
             "title": "Demo Knowledge Page",
             "summary": "AgentMesh coordinates distributed agent work through a registry and router.",
             "key_facts": [
@@ -299,9 +299,11 @@ def test_ingest_main_builds_expected_summary_from_fixture(tmp_path, monkeypatch)
     assert run_summary["processed"] == 1
     assert run_summary["page_stats"]["topics"] == 2
     event_lines = (state_dir / "ingest_events.jsonl").read_text(encoding="utf-8").strip().splitlines()
-    assert len(event_lines) == 2
+    # LWC-n3um added a trailing run_summary event emitted just before return 0.
+    assert len(event_lines) == 3
     assert json.loads(event_lines[0])["event"] == "ingest_file_started"
     assert json.loads(event_lines[1])["event"] == "ingest_file_completed"
+    assert json.loads(event_lines[2])["event"] == "run_summary"
     assert (state_dir / "last_ingest_report.md").exists()
 
 
@@ -328,7 +330,11 @@ def test_ingest_dry_run_reports_actions_without_writing(tmp_path):
     # Dry-run still goes through ensure_workspace_writable() per the DISPATCH
     # contract (ARCHITECTURE §5.3 / §6), so wiki subdirs exist but are empty.
     assert not list((workspace.summaries_dir).glob("*"))
-    assert not workspace.ingest_events_path.exists()
+    # LWC-n3um: main() returning 0 (including the --dry-run success path) now
+    # emits exactly one run_summary event to ingest_events_path.
+    event_lines = workspace.ingest_events_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(event_lines) == 1
+    assert json.loads(event_lines[0])["event"] == "run_summary"
     assert workspace.ingest_report_path.exists()
 
 
