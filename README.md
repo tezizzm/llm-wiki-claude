@@ -71,9 +71,45 @@ This runs an incremental sync (no prune) followed by ingestion of new or changed
 
 Open the `wiki/` directory in [Obsidian](https://obsidian.md) or any markdown viewer.
 
+## Multi-workspace usage
+
+Starting in 0.3.0, llm-wiki supports running multiple isolated wikis from a single install.
+
+### Using a workspace
+
+Scaffold a new workspace:
+
+    llm-wiki --workspace ~/wikis/work init
+
+Use it with every command:
+
+    llm-wiki --workspace ~/wikis/work doctor
+    llm-wiki --workspace ~/wikis/work refresh-fast
+    llm-wiki --workspace ~/wikis/work query
+
+Or set the env var once and drop the flag:
+
+    export LLM_WIKI_WORKSPACE=~/wikis/work
+    llm-wiki doctor
+    llm-wiki refresh-fast
+
+### Precedence
+
+`--workspace` always beats `LLM_WIKI_WORKSPACE`. If neither is set, llm-wiki operates in repo-root mode (the 0.2.0 default). This keeps upgrade-in-place working for existing installs.
+
+### Fallbacks
+
+A fresh workspace only needs `sync-sources.local.json` to be minimally useful. If `ingest-settings.local.json`, `.env`, `.wikiignore`, or `schemas/AGENTS.md` are missing, llm-wiki falls back to the tracked repo-root copy. Run `llm-wiki --workspace <path> doctor` to see which files are resolved from the workspace vs. the repo-root fallback.
+
+### What isn't supported yet
+
+- Cross-workspace queries: each command runs against exactly one workspace.
+- Workspace discovery/listing.
+- Workspace templates beyond the single default scaffold produced by `init`.
+
 ## CLI Commands
 
-The `llm-wiki` CLI provides a unified interface for all workflows:
+The `llm-wiki` CLI provides a unified interface for all workflows. Every command accepts `--workspace <path>` (or the `LLM_WIKI_WORKSPACE` env var) to run against an isolated workspace; see [Multi-workspace usage](#multi-workspace-usage) above.
 
 ```bash
 llm-wiki doctor             # Pre-flight checks: config, versions, demo artifacts

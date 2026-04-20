@@ -16,6 +16,40 @@ Before cutting a version:
 8. Confirm no local-only files or generated private corpus data are staged
 9. Optionally fill in [`RELEASE_PREP_TEMPLATE.md`](/Users/martez/src/llm-wiki-claude/RELEASE_PREP_TEMPLATE.md) for the cut
 
+## Pre-release Gates
+
+The following gates must all pass before starting the changelog promotion and tag flow. Each gate maps to a real test shipped by the multi-workspace epics -- run them in this order and treat the first failure as a blocker:
+
+- [ ] `make test` passes (all unit, integration, isolation, regression, fallback tests)
+- [ ] `pytest tests/test_templates_sync.py -v` passes (`scripts/templates/` byte-equal to repo-root copies)
+- [ ] `pytest tests/test_isolation.py -v` passes (the primary success signal -- workspace runs never touch the repo root)
+- [ ] `pytest tests/test_repo_root_regression.py -v` passes (0.2.0 repo-root workflow unchanged)
+- [ ] `pytest tests/test_fallback_resolution.py -v` passes (workspace -> repo-root fallback paths covered)
+- [ ] `make release-check` passes
+- [ ] Grep `CHANGELOG.md` for `$`, `cost`, `price`, and `pricing`. None of these words should appear in the Unreleased or new-version section (see ARCHITECTURE §10.6 -- this project does not publish pricing or cost guidance).
+- [ ] `llm-wiki doctor` from repo root exits 0 (or the degraded state is documented in the release notes)
+
+### Template Drift Reminder
+
+If `scripts/templates/*.json` was modified intentionally, make sure the matching repo-root copy was updated too. The byte-equality test (`tests/test_templates_sync.py`) catches drift, but only if it is run. The reverse is equally true: if the repo-root copies were edited, sync `scripts/templates/` to match. A release that ships drifted templates will surface as a broken `llm-wiki init` for downstream users.
+
+## Changelog Promotion
+
+Once the pre-release gates are green, promote the changelog before tagging:
+
+- [ ] Move the `[Unreleased]` block into a new `[0.3.0] - YYYY-MM-DD` section in `CHANGELOG.md`
+- [ ] Create a fresh empty `[Unreleased]` block at the top of `CHANGELOG.md`
+- [ ] Bump the version in `pyproject.toml` to `0.3.0`
+- [ ] Commit with message: `Release 0.3.0`
+
+## Post-release
+
+After the `Release 0.3.0` commit lands:
+
+- [ ] `git tag -a v0.3.0 -m "Release 0.3.0"`
+- [ ] `git push origin v0.3.0`
+- [ ] Verify the CI release workflow passes (if configured); otherwise confirm CI is green on the release commit.
+
 ## Versioning Policy
 
 - Use SemVer-style versioning: `MAJOR.MINOR.PATCH`
