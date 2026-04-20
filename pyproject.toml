@@ -7,7 +7,7 @@ name = "llm-wiki-starter"
 dynamic = ["version"]
 description = "A local markdown-based LLM wiki starter with sync, ingest, query, and lint workflows."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
   { name = "Martez Mott" }
