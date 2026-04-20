@@ -432,3 +432,192 @@ def test_init_detects_outer_repo_through_symlinked_target(
     # Walking up from the symlink's parent (tmp_path) would NOT find the repo;
     # walking up from the resolved real path (outer/subdir) DOES.
     assert init_module._detect_outer_git_repo(link) == outer.resolve()
+
+
+# ---------------------------------------------------------------------------
+# LWC-wn2r: structured final output (DESIGN §5.2, §5.3, §6.3)
+# ---------------------------------------------------------------------------
+
+
+def _resolved(target: Path) -> Path:
+    """Helper: the absolute, resolved path init uses in its output."""
+
+    return target.resolve()
+
+
+def test_init_output_format_matches_design_spec_first_run(
+    tmp_path: Path, capsys
+) -> None:
+    """AC 1: first-run output matches DESIGN §5.2 byte-for-byte."""
+    target = tmp_path / "ws"
+    rc = init_module.main([str(target)])
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    expected = (
+        f"Initialized workspace at {_resolved(target)}\n"
+        "\n"
+        "Created:\n"
+        "  .env.example, .env, .gitignore, .wikiignore\n"
+        "  sync-sources.local.json, ingest-settings.local.json\n"
+        "  schemas/AGENTS.md\n"
+        "  raw/inbox/, wiki/{summaries,topics,entities}/, state/\n"
+        "  index.md, log.md\n"
+        "\n"
+        "Next steps:\n"
+        "  1. Edit .env and set ANTHROPIC_API_KEY\n"
+        "  2. Edit sync-sources.local.json to point at your sources\n"
+        f"  3. Run: llm-wiki --workspace {target} refresh-fast\n"
+    )
+    assert captured.out == expected
+
+
+def test_init_output_format_preserves_user_path_in_next_steps(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """AC 3: Next steps step 3 uses the user's ORIGINAL PATH argument
+    verbatim (tilde token preserved), even though the first line prints
+    the resolved absolute path."""
+    # Run init from an isolated cwd so the relative '~/wikis/foo' token
+    # becomes a real directory under tmp_path (Path does not expand '~';
+    # init receives the literal string and _resolve_against_cwd stacks it
+    # onto cwd). We're not testing tilde expansion here -- we're testing
+    # that step 3 emits the ORIGINAL string byte-for-byte.
+    monkeypatch.chdir(tmp_path)
+
+    user_path = "~/wikis/foo"
+    rc = init_module.main([user_path])
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    # Step 3 must keep the original tilde form so users can copy/paste it
+    # into their own shell (where ~ will expand correctly).
+    assert "  3. Run: llm-wiki --workspace ~/wikis/foo refresh-fast" in captured.out
+    # The first line uses the resolved absolute path, not the user's literal
+    # argument: it must start with the absolute cwd (not the tilde token).
+    first_line = captured.out.splitlines()[0]
+    assert first_line.startswith(f"Initialized workspace at {tmp_path}")
+
+
+def test_init_idempotent_output(tmp_path: Path, capsys) -> None:
+    """AC 1: fully idempotent re-run prints the DESIGN §5.3 no-op message
+    and still includes the Next steps block (AC 2)."""
+    target = tmp_path / "ws"
+    assert init_module.main([str(target)]) == 0
+    capsys.readouterr()  # discard first-run output
+
+    # Second run: nothing to do.
+    assert init_module.main([str(target)]) == 0
+
+    captured = capsys.readouterr()
+    expected = (
+        f"Workspace already initialized at {_resolved(target)}. "
+        "No changes made.\n"
+        "\n"
+        "Next steps:\n"
+        "  1. Edit .env and set ANTHROPIC_API_KEY\n"
+        "  2. Edit sync-sources.local.json to point at your sources\n"
+        f"  3. Run: llm-wiki --workspace {target} refresh-fast\n"
+    )
+    assert captured.out == expected
+
+
+def test_init_mixed_outcome_output(tmp_path: Path, capsys) -> None:
+    """AC 1: mixed idempotent re-run (DESIGN §5.3 example).
+
+    Delete .gitignore after first run; second bare run creates it and skips
+    the rest. Output must list .gitignore under Created and the rest under
+    Skipped (already exist). Directory group must NOT print (this is a
+    re-run, not a first run)."""
+    target = tmp_path / "ws"
+    assert init_module.main([str(target)]) == 0
+    capsys.readouterr()
+
+    # Remove exactly one template file so the second run has a mixed result.
+    (target / ".gitignore").unlink()
+
+    assert init_module.main([str(target)]) == 0
+
+    captured = capsys.readouterr()
+    expected = (
+        f"Initialized workspace at {_resolved(target)}\n"
+        "\n"
+        "Created:\n"
+        "  .gitignore\n"
+        "\n"
+        "Skipped (already exist):\n"
+        "  .env.example, .env, .wikiignore\n"
+        "  sync-sources.local.json, ingest-settings.local.json\n"
+        "  schemas/AGENTS.md\n"
+        "  index.md, log.md\n"
+        "\n"
+        "Next steps:\n"
+        "  1. Edit .env and set ANTHROPIC_API_KEY\n"
+        "  2. Edit sync-sources.local.json to point at your sources\n"
+        f"  3. Run: llm-wiki --workspace {target} refresh-fast\n"
+    )
+    assert captured.out == expected
+
+
+def test_init_warning_block_between_created_and_next_steps(
+    tmp_path: Path, capsys
+) -> None:
+    """AC 4: when _detect_outer_git_repo returns a path, the warning block
+    appears AFTER the Created: block and BEFORE the Next steps: block."""
+    outer = tmp_path / "repo"
+    (outer / ".git").mkdir(parents=True)
+    target = outer / "subdir"
+
+    assert init_module.main([str(target)]) == 0
+
+    captured = capsys.readouterr()
+    created_idx = captured.out.index("Created:")
+    warning_idx = captured.out.index("Warning:")
+    next_steps_idx = captured.out.index("Next steps:")
+    # Strict ordering: Created: < Warning: < Next steps:.
+    assert created_idx < warning_idx < next_steps_idx
+
+
+def test_init_warning_uses_exact_design_text(tmp_path: Path, capsys) -> None:
+    """AC 5: warning text matches DESIGN §6.3 byte-for-byte."""
+    outer = tmp_path / "repo"
+    (outer / ".git").mkdir(parents=True)
+    target = outer / "subdir"
+
+    assert init_module.main([str(target)]) == 0
+
+    captured = capsys.readouterr()
+    expected_warning = (
+        f"Warning: {_resolved(target)} is inside an existing\n"
+        f"git repository ({_resolved(outer)}). A workspace .gitignore\n"
+        "was written covering .env, raw/, state/, and wiki/, but you\n"
+        "should verify before committing.\n"
+    )
+    assert expected_warning in captured.out
+
+
+def test_init_absent_warning_when_no_outer_repo(
+    tmp_path: Path, capsys
+) -> None:
+    """AC 4: no warning block when the target is not inside an outer repo."""
+    # Guard: pytest's tmp_path may be nested under the real tool repo in some
+    # CI configurations. Skip the assertion in that case so we don't flake.
+    if init_module._detect_outer_git_repo(tmp_path / "probe") is not None:
+        pytest.skip("tmp_path is nested inside a real git repo; test is moot")
+
+    target = tmp_path / "ws"
+    assert init_module.main([str(target)]) == 0
+
+    captured = capsys.readouterr()
+    assert "Warning:" not in captured.out
+
+
+def test_init_warning_does_not_affect_exit_code(
+    tmp_path: Path,
+) -> None:
+    """AC 6: warning is advisory; init still returns 0 when it fires."""
+    outer = tmp_path / "repo"
+    (outer / ".git").mkdir(parents=True)
+    target = outer / "subdir"
+
+    assert init_module.main([str(target)]) == 0
