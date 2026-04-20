@@ -268,12 +268,70 @@ def test_verbose_resolution_block_shows_fallback(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_main_init_not_implemented(monkeypatch, capsys):
+def test_cli_dispatches_init(tmp_path, monkeypatch, capsys):
+    """`llm-wiki init PATH` dispatches to scripts.init.main and scaffolds."""
     monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
-    code = cli.main(["init", "/tmp/whatever"])
-    assert code == 2
+    target = tmp_path / "ws-x"
+    assert not target.exists()
+
+    code = cli.main(["init", str(target)])
+    assert code == 0
+
+    # init scaffolds the workspace directory structure.
+    assert target.is_dir()
+    assert (target / "raw" / "inbox").is_dir()
+    assert (target / "wiki" / "summaries").is_dir()
+    assert (target / "wiki" / "topics").is_dir()
+    assert (target / "wiki" / "entities").is_dir()
+    assert (target / "state").is_dir()
+    assert (target / "schemas").is_dir()
+
+    # No global --workspace was provided, so no "ignored" note should appear.
     captured = capsys.readouterr()
-    assert "not yet implemented" in captured.err
+    assert "ignored for init" not in captured.err
+
+
+def test_cli_init_ignores_workspace_flag(tmp_path, monkeypatch, capsys):
+    """--workspace alongside init prints a note and still runs init on PATH."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    ignored_ws = tmp_path / "foo"
+    target = tmp_path / "ws"
+    assert not target.exists()
+
+    code = cli.main(["--workspace", str(ignored_ws), "init", str(target)])
+    assert code == 0
+
+    captured = capsys.readouterr()
+    assert (
+        "Note: --workspace is ignored for init; init uses the "
+        "positional PATH argument."
+    ) in captured.err
+
+    # init ran against the positional PATH (not the --workspace value).
+    assert target.is_dir()
+    assert (target / "raw" / "inbox").is_dir()
+    # The --workspace target was NOT scaffolded.
+    assert not ignored_ws.exists()
+
+
+def test_cli_init_no_banner(tmp_path, monkeypatch, capsys):
+    """init must never trigger the workspace-aware banner (DESIGN §4.1)."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    target = tmp_path / "ws"
+
+    # Without --workspace
+    code = cli.main(["init", str(target)])
+    assert code == 0
+    out1 = capsys.readouterr().out
+    assert "Workspace:" not in out1
+
+    # With --workspace (which is ignored for init)
+    target2 = tmp_path / "ws2"
+    ignored = tmp_path / "ignored"
+    code = cli.main(["--workspace", str(ignored), "init", str(target2)])
+    assert code == 0
+    out2 = capsys.readouterr().out
+    assert "Workspace:" not in out2
 
 
 def test_main_banner_plus_doctor_uses_flag_workspace(tmp_path, monkeypatch, capsys):

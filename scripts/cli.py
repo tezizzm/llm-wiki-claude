@@ -15,7 +15,7 @@ import os
 import sys
 from typing import Callable
 
-from scripts import doctor, ingest, lint, query, sync
+from scripts import doctor, ingest, init as init_module, lint, query, sync
 from scripts.version import read_version
 from scripts.workspace import (
     WorkspaceNotFoundError,
@@ -203,7 +203,8 @@ def main(argv: list[str] | None = None) -> int:
     Steps:
       1. Normalize ``argv`` to a list (defaulting to ``sys.argv[1:]``).
       2. Extract the global ``--workspace`` and ``--verbose`` flags.
-      3. Short-circuit ``init`` (not yet implemented).
+      3. Short-circuit ``init`` to :mod:`scripts.init` (the only subcommand
+         that does not require an existing workspace).
       4. Resolve the workspace via ``resolve_workspace``.
       5. Print the banner (non-default sources only) and optional verbose
          resolution block.
@@ -228,11 +229,19 @@ def main(argv: list[str] | None = None) -> int:
     subcommand = argv[0] if argv else None
 
     if subcommand == "init":
-        print(
-            "Error: `llm-wiki init` is not yet implemented in this release.",
-            file=sys.stderr,
-        )
-        return 2
+        # ``init`` is the only subcommand that does not take a WorkspacePaths.
+        # Dispatch happens BEFORE ``resolve_workspace`` because init creates
+        # the workspace. Per ARCHITECTURE §4.3/§4.5, if the user passes
+        # ``--workspace`` alongside ``init``, the global extractor has already
+        # consumed it, but init uses its own positional PATH; warn the user
+        # that the global flag is ignored.
+        if path_arg is not None:
+            print(
+                "Note: --workspace is ignored for init; init uses the "
+                "positional PATH argument.",
+                file=sys.stderr,
+            )
+        return init_module.main(argv[1:])
 
     env_var = os.environ.get("LLM_WIKI_WORKSPACE")
     try:
