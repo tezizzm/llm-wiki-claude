@@ -242,6 +242,7 @@ def _handle_refresh_fast(argv: list[str], workspace: WorkspacePaths) -> int:
 DISPATCH: dict[str, Callable[[list[str], WorkspacePaths], int]] = {
     "doctor": doctor.main,
     "ingest": ingest.main,
+    "lint": lint.main,
     "show-config": show_config.main,
     "sync": sync.main,
 }
@@ -268,7 +269,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     query_parser = subparsers.add_parser("query", help="Ask a question against the local wiki.")
     query_parser.add_argument("query_args", nargs=argparse.REMAINDER)
-    subparsers.add_parser("lint", help="Lint the generated wiki.")
+    lint_parser = subparsers.add_parser("lint", help="Lint the generated wiki.")
+    lint_parser.add_argument("lint_args", nargs=argparse.REMAINDER)
     subparsers.add_parser("doctor", help="Validate local config, versioning, and demo artifact readiness.")
     subparsers.add_parser("show-config", help="Print the resolved config paths for the active workspace.")
 
@@ -356,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
         query.main()
         return 0
     if args.command == "lint":
-        raise SystemExit(lint.main())
+        raise SystemExit(DISPATCH["lint"](list(args.lint_args), workspace))
     if args.command == "doctor":
         raise SystemExit(DISPATCH["doctor"]([], workspace))
     if args.command == "show-config":
