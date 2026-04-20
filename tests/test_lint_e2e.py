@@ -1,21 +1,34 @@
 """E2e tests for lint PASS/FAIL output via the CLI entry point.
 
-Exercises cli.main(["lint"]) end-to-end: output format, exit codes,
-summary line, and file immutability.
+Workspace-aware refactor (LWC-7yge): tests drive cli.main(['lint']) against
+the workspace resolved by ``--workspace`` or the repo-root default, rather
+than monkey-patching module-level path constants.  Asserts:
+
+* Exit code propagation via the DISPATCH table.
+* ``[PASS]``/``[FAIL]`` line formatting + indented detail lines.
+* File immutability -- lint never writes, creates, or deletes files.
+* Banner suppression on repo-root default, banner emission on ``--workspace``.
 """
 
 import hashlib
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
 import pytest
 
 from scripts import cli, lint
+from scripts.workspace import WorkspacePaths
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_passing_page(wiki_dir: Path, name: str = "good-page") -> Path:
     """Create a wiki page that passes all four lint checks."""
@@ -45,7 +58,7 @@ def _make_failing_page(wiki_dir: Path, name: str = "bad-page") -> Path:
 
 def _snapshot_dir(directory: Path) -> dict[str, str]:
     """Return {relative_path: sha256} for every file in directory."""
-    result = {}
+    result: dict[str, str] = {}
     for f in sorted(directory.rglob("*")):
         if f.is_file():
             digest = hashlib.sha256(f.read_bytes()).hexdigest()
@@ -53,42 +66,35 @@ def _snapshot_dir(directory: Path) -> dict[str, str]:
     return result
 
 
-def _setup_wiki(tmp_path, monkeypatch, pages_fn):
-    """Create wiki dir, apply pages_fn, and monkeypatch lint constants."""
-    wiki_dir = tmp_path / "wiki"
-    wiki_dir.mkdir()
-    pages_fn(wiki_dir)
-    monkeypatch.setattr(lint, "WIKI_DIR", wiki_dir)
-    monkeypatch.setattr(lint, "ROOT", tmp_path)
-    return wiki_dir
+def _run_cli_lint(workspace: WorkspacePaths, monkeypatch) -> None:
+    """Drive cli.main(['--workspace', ws, 'lint']) and raise SystemExit at the end."""
+    monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
+    cli.main(["--workspace", str(workspace.root), "lint"])
 
 
 # ---------------------------------------------------------------------------
 # AC 1: Clean wiki -> all [PASS], summary 0 failed, exit code 0
 # ---------------------------------------------------------------------------
 
-class TestCleanWikiAllPass:
-    """cli.main(["lint"]) with a clean wiki produces all PASS lines and exit 0."""
 
-    def test_exit_code_zero(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_passing_page(d, "alpha"),
-            _make_passing_page(d, "beta"),
-        ))
+class TestCleanWikiAllPass:
+    """cli.main(['lint']) with a clean wiki produces all PASS lines and exit 0."""
+
+    def test_exit_code_zero(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_passing_page(tmp_workspace.wiki_dir, "alpha")
+        _make_passing_page(tmp_workspace.wiki_dir, "beta")
 
         with pytest.raises(SystemExit) as exc_info:
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         assert exc_info.value.code == 0
 
-    def test_all_pass_lines_present(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_passing_page(d, "alpha"),
-            _make_passing_page(d, "beta"),
-        ))
+    def test_all_pass_lines_present(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_passing_page(tmp_workspace.wiki_dir, "alpha")
+        _make_passing_page(tmp_workspace.wiki_dir, "beta")
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         output = capsys.readouterr().out
         assert "[PASS] Source attribution" in output
@@ -96,25 +102,21 @@ class TestCleanWikiAllPass:
         assert "[PASS] Internal links" in output
         assert "[PASS] Orphaned links" in output
 
-    def test_no_fail_lines(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_passing_page(d, "alpha"),
-            _make_passing_page(d, "beta"),
-        ))
+    def test_no_fail_lines(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_passing_page(tmp_workspace.wiki_dir, "alpha")
+        _make_passing_page(tmp_workspace.wiki_dir, "beta")
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         output = capsys.readouterr().out
         assert "[FAIL]" not in output
 
-    def test_summary_zero_failed(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_passing_page(d, "alpha"),
-        ))
+    def test_summary_zero_failed(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_passing_page(tmp_workspace.wiki_dir, "alpha")
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         output = capsys.readouterr().out
         assert "0 checks failed, 4 checks passed" in output
@@ -124,49 +126,42 @@ class TestCleanWikiAllPass:
 # AC 2: Wiki with issues -> [FAIL] lines with details, SystemExit code 1
 # ---------------------------------------------------------------------------
 
-class TestFailingWikiExitCode:
-    """cli.main(["lint"]) with issues produces FAIL lines and exit 1."""
 
-    def test_exit_code_one(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_failing_page(d, "bad"),
-        ))
+class TestFailingWikiExitCode:
+    """cli.main(['lint']) with issues produces FAIL lines and exit 1."""
+
+    def test_exit_code_one(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_failing_page(tmp_workspace.wiki_dir, "bad")
 
         with pytest.raises(SystemExit) as exc_info:
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         assert exc_info.value.code == 1
 
-    def test_fail_lines_present(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_failing_page(d, "bad"),
-        ))
+    def test_fail_lines_present(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_failing_page(tmp_workspace.wiki_dir, "bad")
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         output = capsys.readouterr().out
         assert "[FAIL]" in output
 
-    def test_fail_details_include_file_paths(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_failing_page(d, "broken"),
-        ))
+    def test_fail_details_include_file_paths(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_failing_page(tmp_workspace.wiki_dir, "broken")
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         output = capsys.readouterr().out
         assert "wiki/broken.md" in output
 
-    def test_mixed_pass_fail_summary(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_passing_page(d, "good"),
-            _make_failing_page(d, "bad"),
-        ))
+    def test_mixed_pass_fail_summary(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_passing_page(tmp_workspace.wiki_dir, "good")
+        _make_failing_page(tmp_workspace.wiki_dir, "bad")
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         output = capsys.readouterr().out
         lines = output.strip().splitlines()
@@ -183,16 +178,15 @@ class TestFailingWikiExitCode:
 # AC 3: Output format matches DESIGN.md spec
 # ---------------------------------------------------------------------------
 
+
 class TestOutputFormat:
     """Output uses [PASS]/[FAIL] prefixes, indented details, and summary."""
 
-    def test_pass_line_format(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_passing_page(d, "alpha"),
-        ))
+    def test_pass_line_format(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_passing_page(tmp_workspace.wiki_dir, "alpha")
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         output = capsys.readouterr().out
         lines = output.strip().splitlines()
@@ -202,13 +196,11 @@ class TestOutputFormat:
             # Format: [PASS] Name -- description
             assert " -- " in line
 
-    def test_fail_line_format(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_failing_page(d, "bad"),
-        ))
+    def test_fail_line_format(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_failing_page(tmp_workspace.wiki_dir, "bad")
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         output = capsys.readouterr().out
         lines = output.strip().splitlines()
@@ -218,27 +210,23 @@ class TestOutputFormat:
             # Format: [FAIL] Name -- summary
             assert " -- " in line
 
-    def test_detail_lines_indentation(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_failing_page(d, "bad"),
-        ))
+    def test_detail_lines_indentation(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_failing_page(tmp_workspace.wiki_dir, "bad")
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         output = capsys.readouterr().out
         lines = output.strip().splitlines()
         detail_lines = [l for l in lines if l.startswith("       - ")]
         assert len(detail_lines) > 0, "Expected indented detail lines (7 spaces + dash)"
 
-    def test_summary_line_format(self, tmp_path, monkeypatch, capsys):
-        _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_passing_page(d, "alpha"),
-            _make_failing_page(d, "bad"),
-        ))
+    def test_summary_line_format(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_passing_page(tmp_workspace.wiki_dir, "alpha")
+        _make_failing_page(tmp_workspace.wiki_dir, "bad")
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
         output = capsys.readouterr().out
         lines = output.strip().splitlines()
@@ -255,33 +243,104 @@ class TestOutputFormat:
 # AC 4: Lint does not modify any files
 # ---------------------------------------------------------------------------
 
+
 class TestLintFileImmutability:
     """Lint must not create, modify, or delete any files."""
 
-    def test_clean_wiki_no_file_changes(self, tmp_path, monkeypatch, capsys):
-        wiki_dir = _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_passing_page(d, "alpha"),
-            _make_passing_page(d, "beta"),
-        ))
+    def test_clean_wiki_no_file_changes(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_passing_page(tmp_workspace.wiki_dir, "alpha")
+        _make_passing_page(tmp_workspace.wiki_dir, "beta")
 
-        before = _snapshot_dir(tmp_path)
+        before = _snapshot_dir(tmp_workspace.root)
 
         with pytest.raises(SystemExit):
-            cli.main(["lint"])
+            _run_cli_lint(tmp_workspace, monkeypatch)
 
-        after = _snapshot_dir(tmp_path)
+        after = _snapshot_dir(tmp_workspace.root)
         assert before == after, "Lint modified files in a clean wiki"
 
-    def test_failing_wiki_no_file_changes(self, tmp_path, monkeypatch, capsys):
-        wiki_dir = _setup_wiki(tmp_path, monkeypatch, lambda d: (
-            _make_passing_page(d, "good"),
-            _make_failing_page(d, "bad"),
-        ))
+    def test_failing_wiki_no_file_changes(self, tmp_workspace: WorkspacePaths, monkeypatch, capsys):
+        _make_passing_page(tmp_workspace.wiki_dir, "good")
+        _make_failing_page(tmp_workspace.wiki_dir, "bad")
 
-        before = _snapshot_dir(tmp_path)
+        before = _snapshot_dir(tmp_workspace.root)
+
+        with pytest.raises(SystemExit):
+            _run_cli_lint(tmp_workspace, monkeypatch)
+
+        after = _snapshot_dir(tmp_workspace.root)
+        assert before == after, "Lint modified files in a failing wiki"
+
+
+# ---------------------------------------------------------------------------
+# AC: banner prints once on --workspace, absent on repo-root default
+# ---------------------------------------------------------------------------
+
+
+class TestLintBanner:
+    """Banner lifecycle matches the workspace-aware dispatch contract."""
+
+    def test_lint_e2e_banner_on_workspace(
+        self, tmp_workspace: WorkspacePaths, monkeypatch, capsys
+    ):
+        """``llm-wiki --workspace X lint`` prints the DESIGN §4.2 banner."""
+        _make_passing_page(tmp_workspace.wiki_dir, "alpha")
+
+        with pytest.raises(SystemExit):
+            _run_cli_lint(tmp_workspace, monkeypatch)
+
+        output = capsys.readouterr().out
+        lines = output.splitlines()
+        assert lines[0] == f"Workspace: {tmp_workspace.root} (from --workspace)"
+        # Banner is emitted exactly once.
+        assert output.count("Workspace: ") == 1
+
+    def test_lint_e2e_repo_root_silent(self, tmp_path, monkeypatch, capsys):
+        """``llm-wiki lint`` from the repo-root default prints no banner.
+
+        We still expect lint output (or 'No wiki pages found.') but the
+        ``Workspace: ... (from ...)`` banner must not appear -- 0.2.0
+        behavior must be byte-identical on the default path.
+        """
+        monkeypatch.delenv("LLM_WIKI_WORKSPACE", raising=False)
 
         with pytest.raises(SystemExit):
             cli.main(["lint"])
 
-        after = _snapshot_dir(tmp_path)
-        assert before == after, "Lint modified files in a failing wiki"
+        output = capsys.readouterr().out
+        assert "from --workspace" not in output
+        assert "from LLM_WIKI_WORKSPACE" not in output
+        # The banner line prefix "Workspace:" must not appear.
+        assert "Workspace: " not in output
+
+
+# ---------------------------------------------------------------------------
+# Subprocess smoke test -- real console_scripts entry point
+# ---------------------------------------------------------------------------
+
+
+def test_subprocess_lint_with_workspace_flag(tmp_path):
+    """End-to-end subprocess run produces the banner + PASS output + exit 0."""
+    ws_root = tmp_path / "ws"
+    ws_root.mkdir()
+    (ws_root / "state").mkdir()
+    (ws_root / "raw" / "inbox").mkdir(parents=True)
+    wiki = ws_root / "wiki"
+    (wiki / "summaries").mkdir(parents=True)
+    (wiki / "topics").mkdir(parents=True)
+    (wiki / "entities").mkdir(parents=True)
+    _make_passing_page(wiki, "alpha")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.cli", "--workspace", str(ws_root), "lint"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith(
+        f"Workspace: {ws_root} (from --workspace)\n\n"
+    )
+    assert "[PASS] Source attribution" in result.stdout
+    assert result.stdout.rstrip().endswith("0 checks failed, 4 checks passed")
