@@ -2,9 +2,27 @@
 
 This file tracks user-visible changes and release-relevant migration notes.
 
-## Unreleased
+## [Unreleased]
 
-_None yet._
+### Added
+
+- Global `--workspace PATH` flag on every subcommand for operating on an isolated wiki workspace outside the repo.
+- `LLM_WIKI_WORKSPACE` environment variable as an alternative to the flag.
+- `llm-wiki init` subcommand to scaffold a fresh workspace directory.
+- Ingest now logs per-call and end-of-run token counts to `state/ingest_events.jsonl` and prints a one-line token summary at end of run.
+
+### Changed
+
+- Commands that previously wrote to hard-coded repo-root paths now resolve paths through a workspace object. With no `--workspace` flag or env var, the repo-root workspace is used (identical behavior to 0.2.0 for the repo-root workflow).
+- Doctor now prints a workspace block and a config-resolution block showing which config files come from the workspace vs. the repo-root fallback.
+
+### Fixed
+
+- _None yet._
+
+### Notes
+
+- Backward compatible: existing repo-root users upgrading from 0.2.0 see no change beyond the new token summary line at end of ingest.
 
 ## 0.2.0 - 2026-04-15
 
