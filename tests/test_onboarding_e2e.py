@@ -79,6 +79,11 @@ def _make_mock_client() -> MagicMock:
             block.text = response_json
             response = MagicMock()
             response.content = [block]
+            # LWC-n3um: scripts.claude_api.call_claude reads usage.input_tokens
+            # / usage.output_tokens as ints; the default MagicMock auto-attr
+            # would return a MagicMock and break JSON serialization of the
+            # claude_api_call event.
+            response.usage = MagicMock(input_tokens=0, output_tokens=0)
             return response
         else:
             # Query call
@@ -87,6 +92,7 @@ def _make_mock_client() -> MagicMock:
             block.text = "Based on the wiki content, here is the answer to your question.\n\nSources:\n- wiki/summaries/demo-product.md"
             response = MagicMock()
             response.content = [block]
+            response.usage = MagicMock(input_tokens=0, output_tokens=0)
             return response
 
     client.messages.create.side_effect = _create_response
@@ -172,23 +178,8 @@ def _monkeypatch_roots(project: Path, monkeypatch) -> None:
     ``cli.main(['doctor'])`` resolves the workspace to the project dir.
     """
     monkeypatch.setenv("LLM_WIKI_WORKSPACE", str(project))
-    monkeypatch.setattr(ingest_mod, "ROOT", project)
-    monkeypatch.setattr(ingest_mod, "RAW_DIR", project / "raw" / "inbox")
-    monkeypatch.setattr(ingest_mod, "WIKI_DIR", project / "wiki")
-    monkeypatch.setattr(ingest_mod, "SUMMARIES_DIR", project / "wiki" / "summaries")
-    monkeypatch.setattr(ingest_mod, "TOPICS_DIR", project / "wiki" / "topics")
-    monkeypatch.setattr(ingest_mod, "ENTITIES_DIR", project / "wiki" / "entities")
-    monkeypatch.setattr(ingest_mod, "STATE_DIR", project / "state")
-    monkeypatch.setattr(ingest_mod, "MANIFEST_PATH", project / "state" / "manifest.json")
-    monkeypatch.setattr(ingest_mod, "INDEX_PATH", project / "index.md")
-    monkeypatch.setattr(ingest_mod, "LOG_PATH", project / "log.md")
-    monkeypatch.setattr(ingest_mod, "WIKIIGNORE_PATH", project / ".wikiignore")
-    monkeypatch.setattr(ingest_mod, "INGEST_SETTINGS_PATH", project / "ingest-settings.local.json")
-    monkeypatch.setattr(ingest_mod, "INGEST_FALLBACK_SETTINGS_PATH", project / "ingest-settings.json")
-    monkeypatch.setattr(ingest_mod, "LAST_INGEST_RUN_PATH", project / "state" / "last_ingest_run.json")
-    monkeypatch.setattr(ingest_mod, "INGEST_EVENTS_PATH", project / "state" / "ingest_events.jsonl")
-    monkeypatch.setattr(ingest_mod, "INGEST_REPORT_PATH", project / "state" / "last_ingest_report.md")
-    monkeypatch.setattr(ingest_mod, "SCHEMA_PATH", project / "schemas" / "AGENTS.md")
+    # ingest no longer has module-level path constants (LWC-4z0t); it derives
+    # paths from the WorkspacePaths passed via cli.DISPATCH.
 
     # sync is now workspace-aware (LWC-btzz): the LLM_WIKI_WORKSPACE env var
     # set above routes cli.main(['sync']) to the tmp project without needing
@@ -235,10 +226,16 @@ def _run_sync(monkeypatch):
 
 
 def _run_ingest(mock_client, monkeypatch):
-    """Run ingest with a mocked API client."""
-    monkeypatch.setattr(sys, "argv", ["ingest.py"])
+    """Run ingest with a mocked API client via the CLI dispatch path.
+
+    After LWC-4z0t, ``ingest.main`` is a workspace-aware entry point
+    (``main(argv, workspace) -> int``) wired into ``cli.DISPATCH``.  We route
+    through ``cli.main(['ingest'])`` so the WorkspacePaths resolution and the
+    DISPATCH contract are exercised end-to-end; ``LLM_WIKI_WORKSPACE`` was set
+    in ``_monkeypatch_roots`` so the resolver finds the tmp project dir.
+    """
     with patch.object(ingest_mod, "init_client", return_value=(mock_client, "claude-haiku-4-5")):
-        ingest_mod.main()
+        cli.main(["ingest"])
 
 
 # ---------------------------------------------------------------------------
