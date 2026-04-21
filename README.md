@@ -20,9 +20,9 @@ This tool is best thought of as a compiled-context wiki for curated textual know
 
 ## Prerequisites
 
-- **Python >= 3.10** -- check with `python3 --version`
 - **git**
 - **Anthropic API key** -- sign up at [console.anthropic.com](https://console.anthropic.com) if you do not have one
+- **Python >= 3.10** -- only needed for the pip path; uv downloads Python automatically
 
 ## Quick Start
 
@@ -35,48 +35,57 @@ git clone https://github.com/tezizzm/llm-wiki-claude.git
 cd llm-wiki-claude
 ```
 
-### 2. Install dependencies
-
-Choose the path that fits your setup:
+### 2. Install
 
 **Option A — uv (recommended)**
 
-[uv](https://docs.astral.sh/uv/) handles Python version, virtualenv, and packages in one step. Works identically on Mac, Linux, and Windows.
+[uv](https://docs.astral.sh/uv/) manages Python, the virtualenv, and all packages in one command. If you don't have Python 3.10+ installed, uv downloads it for you automatically.
+
+Install uv (one-time):
+
+- **Mac/Linux:**
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+- **Windows (PowerShell):** `irm https://astral.sh/uv/install.ps1 | iex`
+
+Install the project:
 
 ```bash
-# Install uv if you don't have it (one-time)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install the project
 uv sync --dev
 ```
 
-Then activate the uv-managed environment before running CLI commands:
+Activate the environment (once per terminal session):
 
-```bash
-source .venv/bin/activate   # Mac/Linux
-.venv\Scripts\activate      # Windows
-```
+- **Mac/Linux:** `source .venv/bin/activate`
+- **Windows:** `.venv\Scripts\activate`
 
 **Option B — standard pip**
 
+Requires Python 3.10+ already installed (`python3 --version` to check).
+
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate        # Mac/Linux: source .venv/bin/activate
-                                 # Windows:   .venv\Scripts\activate
 pip install --upgrade pip setuptools wheel
 pip install -e '.[dev]'
 ```
+
+Activate (once per terminal session):
+
+- **Mac/Linux:** `source .venv/bin/activate`
+- **Windows:** `.venv\Scripts\activate`
 
 ### 3. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env and set ANTHROPIC_API_KEY
+# Edit .env — set ANTHROPIC_API_KEY
 
 cp sync-sources.json sync-sources.local.json
-# Edit sync-sources.local.json with your source repo paths
+# Edit sync-sources.local.json — set your source repo paths
 ```
+
+> **Windows:** use `copy` instead of `cp`.
 
 ### 4. Validate
 
@@ -84,7 +93,7 @@ cp sync-sources.json sync-sources.local.json
 llm-wiki doctor
 ```
 
-All checks should PASS. If any fail, fix the indicated issue before continuing.
+All checks should PASS. Fix any failures before continuing.
 
 ### 5. Build (~5-10 min)
 
@@ -94,7 +103,7 @@ make refresh-fast
 
 This runs an incremental sync (no prune) followed by ingestion of new or changed raw files.
 
-> **Windows / no make:** run the two steps directly:
+> **No make (Windows or minimal Linux):** run the two steps directly:
 > ```bash
 > llm-wiki sync
 > llm-wiki ingest
@@ -106,11 +115,15 @@ Open the `wiki/` directory in [Obsidian](https://obsidian.md) or any markdown vi
 
 ## Troubleshooting
 
-### `python3` not found
+### uv not found after install
 
-On Windows, try `python` instead of `python3`. If Python is not installed, download it from [python.org](https://www.python.org/downloads/) (3.10 or newer).
+Close and reopen your terminal (or run `source ~/.bashrc` / `source ~/.zshrc`) so the new `uv` command is on your PATH.
 
-### Error: `Cannot import 'setuptools.build_meta'`
+### `python3` not found (pip path)
+
+On Windows, try `python` instead of `python3`. If Python is not installed, download it from [python.org](https://www.python.org/downloads/) (3.10 or newer) — or switch to the uv path, which handles this for you.
+
+### Error: `Cannot import 'setuptools.build_meta'` (pip path)
 
 Upgrade packaging tools inside the active virtualenv, then retry:
 
@@ -119,9 +132,11 @@ pip install --upgrade pip setuptools wheel
 pip install -e '.[dev]'
 ```
 
-### Clean pip reinstall
+### Clean reinstall
 
-If your environment got into a bad state:
+**uv:** just re-run `uv sync --dev` — it rebuilds from the lock file automatically.
+
+**pip:** delete the virtualenv and start fresh:
 
 ```bash
 rm -rf .venv
@@ -130,8 +145,6 @@ source .venv/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install -e '.[dev]'
 ```
-
-For uv, just re-run `uv sync --dev` — it rebuilds from the lock file automatically.
 
 ## Multi-workspace usage
 
