@@ -4,6 +4,10 @@ This file tracks user-visible changes and release-relevant migration notes.
 
 ## [Unreleased]
 
+_None yet._
+
+## [0.3.0] - 2026-04-20
+
 ### Added
 
 - Global `--workspace PATH` flag on every subcommand for operating on an isolated wiki workspace outside the repo.
