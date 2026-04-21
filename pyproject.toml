@@ -29,6 +29,9 @@ dev = [
 [project.scripts]
 llm-wiki = "scripts.cli:main"
 
+[dependency-groups]
+dev = ["pytest>=8.3.0"]
+
 [tool.setuptools]
 packages = ["scripts", "scripts.templates", "scripts.templates.schemas"]
 

@@ -14,10 +14,20 @@ All generated wiki output lives under `wiki/`. State files (manifests, event log
 
 ## Setup
 
+**uv (fastest):**
+
+```bash
+uv sync --dev
+cp .env.example .env   # fill in ANTHROPIC_API_KEY
+```
+
+**pip fallback:**
+
 ```bash
 python3 -m venv .venv
-. .venv/bin/activate && pip install -r requirements.txt
-. .venv/bin/activate && pip install --no-build-isolation -e '.[dev]'
+. .venv/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install -e '.[dev]'
 cp .env.example .env   # fill in ANTHROPIC_API_KEY
 ```
 

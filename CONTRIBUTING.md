@@ -2,22 +2,43 @@
 
 ## Getting Started
 
-1. Create a virtualenv and install dependencies:
-   `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && pip install --no-build-isolation -e '.[dev]'`
-2. Copy `.env.example` to `.env`
-3. Copy `sync-sources.json` to `sync-sources.local.json`
-4. Optionally copy `ingest-settings.json` to `ingest-settings.local.json`
+**Option A — uv (recommended, fastest):**
+
+```bash
+uv sync --dev
+```
+
+`uv` manages the Python version, virtualenv, and all dependencies in one step.
+Install uv first if you don't have it: https://docs.astral.sh/uv/getting-started/installation/
+
+**Option B — standard pip:**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install --upgrade pip setuptools wheel
+pip install -e '.[dev]'
+```
+
+Then:
+
+1. Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`
+2. Copy `sync-sources.json` to `sync-sources.local.json`
+3. Optionally copy `ingest-settings.json` to `ingest-settings.local.json`
 
 ## After Pulling Changes
 
-If a pull adds new dependencies to `requirements.txt` or `pyproject.toml`, re-run:
+If a pull adds or changes dependencies in `pyproject.toml`, re-run your install step:
 
-```
-pip install -r requirements.txt && pip install --no-build-isolation -e '.[dev]'
+```bash
+# uv
+uv sync --dev
+
+# pip
+pip install -e '.[dev]'
 ```
 
-This keeps your local virtualenv in sync and prevents `ModuleNotFoundError` failures
-when running tests.
+This keeps your local environment in sync and prevents `ModuleNotFoundError` failures when running tests.
 
 ## Local Checks
 

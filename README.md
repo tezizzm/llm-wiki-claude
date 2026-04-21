@@ -20,13 +20,13 @@ This tool is best thought of as a compiled-context wiki for curated textual know
 
 ## Prerequisites
 
-- **Python >= 3.10**
+- **Python >= 3.10** -- check with `python3 --version`
 - **git**
 - **Anthropic API key** -- sign up at [console.anthropic.com](https://console.anthropic.com) if you do not have one
 
 ## Quick Start
 
-Go from `git clone` to a working wiki in under 15 minutes:
+Go from `git clone` to a working wiki in under 15 minutes.
 
 ### 1. Clone
 
@@ -35,36 +35,50 @@ git clone https://github.com/tezizzm/llm-wiki-claude.git
 cd llm-wiki-claude
 ```
 
-### 2. Create a virtual environment
+### 2. Install dependencies
+
+Choose the path that fits your setup:
+
+**Option A — uv (recommended)**
+
+[uv](https://docs.astral.sh/uv/) handles Python version, virtualenv, and packages in one step. Works identically on Mac, Linux, and Windows.
+
+```bash
+# Install uv if you don't have it (one-time)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install the project
+uv sync --dev
+```
+
+Then activate the uv-managed environment before running CLI commands:
+
+```bash
+source .venv/bin/activate   # Mac/Linux
+.venv\Scripts\activate      # Windows
+```
+
+**Option B — standard pip**
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate        # Mac/Linux: source .venv/bin/activate
+                                 # Windows:   .venv\Scripts\activate
+pip install --upgrade pip setuptools wheel
+pip install -e '.[dev]'
 ```
 
-### 3. Upgrade packaging tools
-
-```bash
-python -m pip install --upgrade pip setuptools wheel
-```
-
-### 4. Install the project
-
-```bash
-python -m pip install -e '.[dev]'
-```
-
-### 5. Configure (~1 min)
+### 3. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env and set your ANTHROPIC_API_KEY
+# Edit .env and set ANTHROPIC_API_KEY
 
 cp sync-sources.json sync-sources.local.json
 # Edit sync-sources.local.json with your source repo paths
 ```
 
-### 6. Validate
+### 4. Validate
 
 ```bash
 llm-wiki doctor
@@ -72,7 +86,7 @@ llm-wiki doctor
 
 All checks should PASS. If any fail, fix the indicated issue before continuing.
 
-### 7. Build (~5-10 min)
+### 5. Build (~5-10 min)
 
 ```bash
 make refresh-fast
@@ -80,41 +94,32 @@ make refresh-fast
 
 This runs an incremental sync (no prune) followed by ingestion of new or changed raw files.
 
-### 8. Browse
+> **Windows / no make:** run the two steps directly:
+> ```bash
+> llm-wiki sync
+> llm-wiki ingest
+> ```
+
+### 6. Browse
 
 Open the `wiki/` directory in [Obsidian](https://obsidian.md) or any markdown viewer.
 
-## Why these install steps?
-
-This project uses the setuptools build backend:
-
-```toml
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-```
-
-Because of that, the simplest and most reliable local install flow is:
-
-```bash
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e '.[dev]'
-```
-
-Using `--no-build-isolation` can fail if the build backend is not already installed in the virtual environment.
-
 ## Troubleshooting
+
+### `python3` not found
+
+On Windows, try `python` instead of `python3`. If Python is not installed, download it from [python.org](https://www.python.org/downloads/) (3.10 or newer).
 
 ### Error: `Cannot import 'setuptools.build_meta'`
 
-Install or upgrade packaging tools inside the active virtual environment, then retry:
+Upgrade packaging tools inside the active virtualenv, then retry:
 
 ```bash
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e '.[dev]'
+pip install --upgrade pip setuptools wheel
+pip install -e '.[dev]'
 ```
 
-### Clean reinstall
+### Clean pip reinstall
 
 If your environment got into a bad state:
 
@@ -122,9 +127,11 @@ If your environment got into a bad state:
 rm -rf .venv
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e '.[dev]'
+pip install --upgrade pip setuptools wheel
+pip install -e '.[dev]'
 ```
+
+For uv, just re-run `uv sync --dev` — it rebuilds from the lock file automatically.
 
 ## Multi-workspace usage
 
