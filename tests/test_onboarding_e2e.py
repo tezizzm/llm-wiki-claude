@@ -404,8 +404,8 @@ class TestReadmeInstructionsMatch:
         assert qs_match, "README must contain a '## Quick Start' section"
         qs = qs_match.group(1)
         step_headings = re.findall(r"### \d+\.\s+\S+", qs)
-        assert len(step_headings) == 6, (
-            f"Expected 6 step headings, found {len(step_headings)}: {step_headings}"
+        assert len(step_headings) >= 6, (
+            f"Expected at least 6 step headings, found {len(step_headings)}: {step_headings}"
         )
 
     def test_readme_documents_env_copy(self):

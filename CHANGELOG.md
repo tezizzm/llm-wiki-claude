@@ -6,6 +6,15 @@ This file tracks user-visible changes and release-relevant migration notes.
 
 _None yet._
 
+## [0.3.1] - 2026-04-20
+
+### Fixed
+
+- README clone URL corrected to `tezizzm/llm-wiki-claude`.
+- README Python prerequisite updated to 3.10 (required by `slots=True` dataclasses).
+- README install steps replaced with the reliable setuptools editable-install flow; removes `--no-build-isolation`.
+- README adds "Why these install steps?" rationale and a Troubleshooting section.
+
 ## [0.3.0] - 2026-04-20
 
 ### Added

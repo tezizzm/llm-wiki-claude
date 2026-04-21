@@ -20,7 +20,7 @@ This tool is best thought of as a compiled-context wiki for curated textual know
 
 ## Prerequisites
 
-- **Python >= 3.9**
+- **Python >= 3.10**
 - **git**
 - **Anthropic API key** -- sign up at [console.anthropic.com](https://console.anthropic.com) if you do not have one
 
@@ -31,17 +31,30 @@ Go from `git clone` to a working wiki in under 15 minutes:
 ### 1. Clone
 
 ```bash
-git clone https://github.com/martez/llm-wiki-claude.git
+git clone https://github.com/tezizzm/llm-wiki-claude.git
 cd llm-wiki-claude
 ```
 
-### 2. Create venv and install dependencies (~2 min)
+### 2. Create a virtual environment
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt && pip install --no-build-isolation -e '.[dev]'
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-### 3. Configure (~1 min)
+### 3. Upgrade packaging tools
+
+```bash
+python -m pip install --upgrade pip setuptools wheel
+```
+
+### 4. Install the project
+
+```bash
+python -m pip install -e '.[dev]'
+```
+
+### 5. Configure (~1 min)
 
 ```bash
 cp .env.example .env
@@ -51,7 +64,7 @@ cp sync-sources.json sync-sources.local.json
 # Edit sync-sources.local.json with your source repo paths
 ```
 
-### 4. Validate (~10 sec)
+### 6. Validate
 
 ```bash
 llm-wiki doctor
@@ -59,7 +72,7 @@ llm-wiki doctor
 
 All checks should PASS. If any fail, fix the indicated issue before continuing.
 
-### 5. Build (~5-10 min)
+### 7. Build (~5-10 min)
 
 ```bash
 make refresh-fast
@@ -67,9 +80,51 @@ make refresh-fast
 
 This runs an incremental sync (no prune) followed by ingestion of new or changed raw files.
 
-### 6. Browse
+### 8. Browse
 
 Open the `wiki/` directory in [Obsidian](https://obsidian.md) or any markdown viewer.
+
+## Why these install steps?
+
+This project uses the setuptools build backend:
+
+```toml
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+```
+
+Because of that, the simplest and most reliable local install flow is:
+
+```bash
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e '.[dev]'
+```
+
+Using `--no-build-isolation` can fail if the build backend is not already installed in the virtual environment.
+
+## Troubleshooting
+
+### Error: `Cannot import 'setuptools.build_meta'`
+
+Install or upgrade packaging tools inside the active virtual environment, then retry:
+
+```bash
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e '.[dev]'
+```
+
+### Clean reinstall
+
+If your environment got into a bad state:
+
+```bash
+rm -rf .venv
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e '.[dev]'
+```
 
 ## Multi-workspace usage
 

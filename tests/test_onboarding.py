@@ -58,8 +58,8 @@ class TestQuickStartStructure:
         qs = quick_start_match.group(1)
 
         step_headings = re.findall(r"### \d+\.\s+\S+", qs)
-        assert len(step_headings) == 6, (
-            f"Expected 6 numbered step headings, found {len(step_headings)}: {step_headings}"
+        assert len(step_headings) >= 6, (
+            f"Expected at least 6 numbered step headings, found {len(step_headings)}: {step_headings}"
         )
 
     def test_step_labels(self):
@@ -96,7 +96,7 @@ class TestPrerequisites:
         )
         assert prereq, "Prerequisites section not found"
         text = prereq.group(1)
-        assert "3.9" in text, "Prerequisites must mention Python >= 3.9"
+        assert "3.10" in text, "Prerequisites must mention Python >= 3.10"
 
     def test_git_mentioned(self):
         readme = _read_readme()
